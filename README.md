@@ -179,7 +179,7 @@ The full team is at [www.iaga.tech/team](https://www.iaga.tech/team).
 
 Research-validated, not marketing-validated.
 
-- **Peer-reviewed, not self-asserted.** A paper by Edoardo Bambini was accepted at AISec 2026, the ACM CCS Workshop on Artificial Intelligence and Security, held in Morocco. It presents IAGA Sentinel's approach to conformity evidence for autonomous AI agents and includes a case study on the platform. Paper link coming soon; details at [www.iaga.tech/research](https://www.iaga.tech/research).
+- **Peer-reviewed, not self-asserted.** A paper by Edoardo Bambini was accepted at AISec 2026, the International Conference on Artificial Intelligence & Cybersecurity, held in Marrakech, Morocco (to appear in the SciMeTech special issue). It presents IAGA Sentinel's approach to conformity evidence for autonomous AI agents and includes a case study on the platform. Paper link coming soon; details at [www.iaga.tech/research](https://www.iaga.tech/research).
 
 ### Recognition
 
