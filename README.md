@@ -29,7 +29,7 @@
 </p>
 
 <p align="center">
-  Built in the EU by <a href="https://www.iaga.tech/team">three founders</a> (French, German, Italian) and <a href="https://www.iaga.tech/research">research-validated, not marketing-validated</a>: peer-reviewed at AISec 2026 (ACM CCS).
+  Built in the EU by <a href="https://www.iaga.tech/team">three founders</a> (French, German, Italian) and <a href="https://www.iaga.tech/research">research-validated, not marketing-validated</a>: peer-reviewed at AISEC 2026, Marrakech.
 </p>
 
 ---
