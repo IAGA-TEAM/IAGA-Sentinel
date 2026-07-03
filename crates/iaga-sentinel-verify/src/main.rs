@@ -31,7 +31,7 @@ fn main() -> ExitCode {
             "-h" | "--help" => {
                 println!("{USAGE}");
                 println!(
-                    "Verifies the Ed25519 signatures and Merkle links of a signed receipt chain."
+                    "Verifies the Ed25519 signatures and hash-chain links of a signed receipt chain."
                 );
                 println!(
                     "Pass --key with the expected public key to authenticate authorship; without"

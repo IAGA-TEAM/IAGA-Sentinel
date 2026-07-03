@@ -3,7 +3,7 @@
 Govern every [VoltAgent](https://voltagent.dev) tool call through a local
 [IAGA Sentinel](https://github.com/EdoardoBambini/IAGA-Sentinel) sidecar. Each
 call is inspected for an `allow` / `review` / `block` verdict before it runs, and
-every verdict becomes an Ed25519-signed receipt linked into a Merkle append-log
+every verdict becomes an Ed25519-signed receipt linked into a hash-chained append-log
 that verifies offline.
 
 Drop-in, dependency-light (built-in `fetch`, no runtime deps), fail-closed by
@@ -92,7 +92,7 @@ about what that means:
 - Every receipt the OSS sidecar signs carries **`isAuthoritative: false`** — the
   community build ships no authoritative kernel.
 - The **hard guarantee is the evidence**, not the blocking: a tamper-evident,
-  Ed25519-signed, Merkle-chained receipt log that verifies offline. The verdict
+  Ed25519-signed, hash-chained receipt log that verifies offline. The verdict
   is advisory; the signed record of what was decided is not.
 
 ### Output scanning is post-execution

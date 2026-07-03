@@ -24,7 +24,7 @@ environment variable, that is called out explicitly.
 ## What a signed receipt contains
 
 Every governance verdict can produce one Ed25519-signed receipt, appended to a per-run
-Merkle chain. The canonical body is defined in
+hash chain. The canonical body is defined in
 `crates/iaga-sentinel-receipts/src/receipt.rs` (`ReceiptBody`). Fields are serialized in a
 stable order; fields that are empty or absent are omitted from the JSON.
 
@@ -138,7 +138,7 @@ that same in-process feed; it does not push to a remote collector in this build.
 ### Verification is offline
 
 `iaga-verify` is a standalone binary that reads an exported chain file and checks the
-Ed25519 signatures and the Merkle links. It opens no database, starts no server, and makes
+Ed25519 signatures and the hash-chain links. It opens no database, starts no server, and makes
 no network call. It reuses the same `verify_chain` routine the runtime uses, so an external
 auditor can confirm a chain on an air-gapped machine.
 

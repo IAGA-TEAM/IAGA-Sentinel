@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "IAGA Sentinel, Ed25519-signed action receipts + Merkle append-log + deterministic replay (Signer trait + drift-replay capture)"
+description = "IAGA Sentinel, Ed25519-signed action receipts + hash-chained append-log + deterministic replay (Signer trait + drift-replay capture)"
 
 [lints]
 workspace = true

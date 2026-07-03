@@ -47,7 +47,7 @@ We follow responsible disclosure. Once a fix is available we will:
 IAGA Sentinel uses Ed25519 signatures where applicable:
 
 - Every governance verdict can be recorded as an Ed25519-signed receipt, appended to a
-  per-run Merkle chain. Anyone can verify a chain offline with `iaga-verify`, with no
+  per-run hash chain. Anyone can verify a chain offline with `iaga-verify`, with no
   database, server, or network access.
 - Plugin manifests can be signed and verified with Ed25519 (opt-in, the
   `plugin-manifest-signing` feature).

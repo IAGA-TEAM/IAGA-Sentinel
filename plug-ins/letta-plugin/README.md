@@ -4,7 +4,7 @@ Govern a [Letta](https://github.com/letta-ai/letta) agent's tool calls through a
 local [IAGA Sentinel](https://github.com/EdoardoBambini/IAGA-Sentinel) sidecar.
 Letta pauses a governed tool at its Human-in-the-Loop approval boundary; this plugin
 asks IAGA for an `allow` / `review` / `block` verdict and replies approve or deny.
-Every verdict becomes an Ed25519-signed receipt linked into a Merkle append-log that
+Every verdict becomes an Ed25519-signed receipt linked into a hash-chained append-log that
 verifies offline.
 
 Dependency-light (the sidecar client is Python stdlib), fail-closed by default.
@@ -133,7 +133,7 @@ In every case IAGA records an Ed25519-signed receipt. The plugin signs nothing.
 - Every receipt the OSS sidecar signs carries **`is_authoritative: false`** — the
   community build ships no authoritative kernel.
 - The **hard guarantee is the evidence**, not the blocking: a tamper-evident,
-  Ed25519-signed, Merkle-chained receipt log that verifies offline.
+  Ed25519-signed, hash-chained receipt log that verifies offline.
 - For **server tools**, IAGA gates the call but does not observe execution inside
   Letta's sandbox.
 

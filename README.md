@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/media/iaga-hero.png" alt="IAGA Sentinel: an isometric evidence chain of signed receipts linking into a single verifiable Merkle root" width="860" />
+  <img src="docs/media/iaga-hero.png" alt="IAGA Sentinel: an isometric evidence chain of signed receipts linking into a single verifiable hash chain" width="860" />
 </p>
 
 <h1 align="center">IAGA Sentinel</h1>
@@ -36,19 +36,19 @@
 
 ## What IAGA Sentinel is
 
-AI agents touch the shell, the filesystem, databases, third-party APIs, and secrets. When a regulator, an auditor, or your own DPO asks you to prove what an agent did, and to prove the record was not altered after the fact, most teams have nothing to show. IAGA Sentinel produces that proof: it sits next to your agent stack (HTTP sidecar, MCP proxy, or `iaga run`) and turns every governance verdict into an Ed25519-signed receipt linked into a Merkle append-log, verifiable offline, with reproducible verdicts (deterministic under fixed risk weights) and replay-based drift detection. The record is structured to support EU AI Act Article 12 record-keeping and to help produce the Annex IV technical documentation a high-risk system needs by 2 August 2026.
+AI agents touch the shell, the filesystem, databases, third-party APIs, and secrets. When a regulator, an auditor, or your own DPO asks you to prove what an agent did, and to prove the record was not altered after the fact, most teams have nothing to show. IAGA Sentinel produces that proof: it sits next to your agent stack (HTTP sidecar, MCP proxy, or `iaga run`) and turns every governance verdict into an Ed25519-signed receipt linked into a hash-chained append-log, verifiable offline, with reproducible verdicts (deterministic under fixed risk weights) and replay-based drift detection. The record is structured to support EU AI Act Article 12 record-keeping and to help produce the Annex IV technical documentation a high-risk system needs by 2 August 2026.
 
 > [!IMPORTANT]
 > IAGA Sentinel governs in the loop and seals hard. Verdicts are computed before an action proceeds; with `iaga run` a blocked process never starts and an allowed one is confined directly — secrets scrubbed from its environment, no core dumps, no privilege escalation, reaped with its parent. The signed evidence and the offline replay are real and verifiable now, from a clean checkout. Kernel-level confinement (eBPF/LSM syscall and network mediation) is the Enterprise tier and is not in this open build: `iaga kernel status` reports the posture honestly, and every receipt carries `is_authoritative: false`. We do not market enforcement we do not provide.
 
 <p align="center">
   <img src="docs/media/iaga-receipt.png" alt="An IAGA Sentinel signed receipt drawn as a precise instrument, sealed with a verification mark and linked into the hash chain" width="640" /><br />
-  <sub>Every governance verdict becomes a signed receipt, sealed with Ed25519 and linked into the Merkle log.</sub>
+  <sub>Every governance verdict becomes a signed receipt, sealed with Ed25519 and linked into the hash-chained log.</sub>
 </p>
 
 What makes it different:
 
-- **Proof, not testimony.** Ed25519 + Merkle receipts, verifiable offline with the standalone `iaga-verify` binary: no server, no network, no trust in IAGA required.
+- **Proof, not testimony.** Ed25519 + hash-chained receipts, verifiable offline with the standalone `iaga-verify` binary: no server, no network, no trust in IAGA required.
 - **Honest posture.** The enforcement posture is recorded inside the signed evidence itself (`is_authoritative: false`), not buried in a footnote.
 - **Sovereign by construction.** Runs fully self-hosted or air-gapped; BUSL-1.1 auto-converts to Apache-2.0; the evidence stays in your hands and need never be handed to a third-party cloud provider.
 - **EU AI Act-shaped.** Receipts line up with Article 12 logging; typed Dictum policies document your risk controls.
@@ -206,7 +206,7 @@ Research-validated, not marketing-validated.
 > **New in 1.5.6: the policy language is now Dictum.** The typed policy DSL (formerly APL / Agent Policy Language) is renamed to Dictum end to end: the `.dictum` file extension, the `iaga-sentinel-dictum` crate, the `dictum` build feature, and the `dictum[...]` reason recorded on every audit event and signed receipt. The rename is behavior-preserving: the signed-receipt wire format stays byte-identical (the `apl_eval_trace` field is kept). See [ADR 0004](docs/adr/0004-dictum-mvp.md) and the [CHANGELOG](CHANGELOG.md).
 
 > [!NOTE]
-> **New in 1.5.4: the policy language now enforces what it promised.** The Dictum `secret_ref()` builtin actually detects credentials and PII inside a tool payload (it was a placeholder that always returned false), and a new `url_host()` builtin gives a policy a real per-host egress allowlist that also defeats look-alike-domain bypasses. Three core fixes ship alongside: the workspace egress allowlist is URL-aware, so a full URL to an allowed host is no longer over-blocked; every `block` or `review` now carries its cause in the audit event and the signed receipt, with no silent escalation; and signed receipts hash-chain across a session, so a multi-step run forms one tamper-evident Merkle chain. See [ADR 0023](docs/adr/0023-dictum-secret-detection-host-egress.md) and the [CHANGELOG](CHANGELOG.md).
+> **New in 1.5.4: the policy language now enforces what it promised.** The Dictum `secret_ref()` builtin actually detects credentials and PII inside a tool payload (it was a placeholder that always returned false), and a new `url_host()` builtin gives a policy a real per-host egress allowlist that also defeats look-alike-domain bypasses. Three core fixes ship alongside: the workspace egress allowlist is URL-aware, so a full URL to an allowed host is no longer over-blocked; every `block` or `review` now carries its cause in the audit event and the signed receipt, with no silent escalation; and signed receipts hash-chain across a session, so a multi-step run forms one tamper-evident hash chain. See [ADR 0023](docs/adr/0023-dictum-secret-detection-host-egress.md) and the [CHANGELOG](CHANGELOG.md).
 
 Current release: **1.8.0** ([release notes](CHANGELOG.md)). CI runs the full workspace test suite (default and `--all-features`), live-Postgres receipt tests, SDK end-to-end smokes against a real sidecar, and clippy with `-D warnings`. All green from a clean checkout.
 

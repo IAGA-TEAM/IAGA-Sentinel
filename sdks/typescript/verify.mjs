@@ -185,7 +185,7 @@ export function main(argv) {
         return 2;
       }
     } else if (a === "-h" || a === "--help") {
-      process.stdout.write(USAGE + "\nVerifies the Ed25519 signatures and Merkle links of a signed receipt chain.\n");
+      process.stdout.write(USAGE + "\nVerifies the Ed25519 signatures and hash-chain links of a signed receipt chain.\n");
       return 0;
     } else if (path === undefined) {
       path = a;

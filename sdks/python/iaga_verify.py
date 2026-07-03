@@ -263,7 +263,7 @@ def main(argv: list) -> int:
                 return 2
         elif a in ("-h", "--help"):
             print(_USAGE)
-            print("Verifies the Ed25519 signatures and Merkle links of a signed receipt chain.")
+            print("Verifies the Ed25519 signatures and hash-chain links of a signed receipt chain.")
             return 0
         elif path is None:
             path = a

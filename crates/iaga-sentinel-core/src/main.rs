@@ -310,7 +310,7 @@ enum Commands {
         /// run_id (event_id in M2) whose receipts should be inspected
         run_id: Option<String>,
 
-        /// Only verify signatures and Merkle links; no drift check
+        /// Only verify signatures and hash-chain links; no drift check
         #[arg(long, default_value_t = false)]
         verify_only: bool,
 

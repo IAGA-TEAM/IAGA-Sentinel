@@ -92,7 +92,7 @@ Everything here is **cooperative agent-loop tier**, not kernel enforcement:
   the framework), nothing stops execution. The block is cooperative.
 - Every OSS receipt carries **`isAuthoritative: false`** — the community build
   ships no authoritative kernel.
-- The **hard guarantee is the evidence**: a tamper-evident, signed, Merkle-chained
+- The **hard guarantee is the evidence**: a tamper-evident, signed, hash-chained
   receipt log that verifies offline.
 
 ---
