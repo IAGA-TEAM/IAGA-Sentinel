@@ -124,7 +124,9 @@ spec:
             - name: IAGA_SENTINEL_RECEIPT_CAPTURE
               value: "false"
             - name: IAGA_SENTINEL_SIGNER_KEY_PATH
-              value: /app/keys/receipt_signer.ed25519
+              # Must match the writable `keys` volume mount below; /app is
+              # read-only, so the signer can't auto-generate a key there.
+              value: /home/iaga/.iaga-sentinel/keys/receipt_signer.ed25519
           livenessProbe:
             httpGet:
               path: /health

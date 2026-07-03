@@ -93,7 +93,9 @@ config:
   receiptCapture: false
   databaseUrl: ""
   nhiMasterSeed: ""
-  signerKeyPath: /app/keys/receipt_signer.ed25519
+  # Must live under the writable `keys` volume mount (see deployment.yaml);
+  # /app is read-only, so a path there fails to auto-generate the signer key.
+  signerKeyPath: /home/iaga/.iaga-sentinel/keys/receipt_signer.ed25519
   pluginDir: /app/plugins
   threatFeed: /app/config/threat-intel.toml
   envDenylist: /app/config/env-denylist.toml
