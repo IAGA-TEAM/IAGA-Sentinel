@@ -7,6 +7,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Instant;
 use tower_http::cors::CorsLayer;
@@ -532,6 +533,7 @@ async fn get_profile_handler(
 }
 
 async fn upsert_profile_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Json(profile): Json<AgentProfile>,
 ) -> Result<impl IntoResponse, SentinelError> {
@@ -540,6 +542,7 @@ async fn upsert_profile_handler(
 }
 
 async fn delete_profile_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
 ) -> Result<StatusCode, SentinelError> {
@@ -568,6 +571,7 @@ async fn get_workspace_handler(
 }
 
 async fn upsert_workspace_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Json(policy): Json<WorkspacePolicy>,
 ) -> Result<impl IntoResponse, SentinelError> {
@@ -576,6 +580,7 @@ async fn upsert_workspace_handler(
 }
 
 async fn delete_workspace_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
 ) -> Result<StatusCode, SentinelError> {
@@ -710,6 +715,7 @@ struct RegisterIdentityBody {
 }
 
 async fn register_identity_handler(
+    _admin: RequireAdmin,
     Json(body): Json<RegisterIdentityBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let identity = crypto_identity::register_identity(
@@ -939,6 +945,7 @@ async fn telemetry_export_handler() -> Json<Vec<serde_json::Value>> {
 // ── Response Scanning ──
 
 async fn response_scan_handler(
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<ResponseScanRequest>,
 ) -> Json<ResponseScanResult> {
     let result = scan_response(&payload);
@@ -951,6 +958,52 @@ async fn response_scan_handler(
         risk_score = result.risk_score,
         "scanned tool response"
     );
+
+    // A response-side Block is a terminal governance decision, so it must land
+    // in the audit log and a signed receipt for EU AI Act Art.12 evidence (#15).
+    // No workspace policy is resolved on this path, so bind no policy/threat
+    // hash; this is purely additive and leaves existing receipts byte-identical.
+    if result.decision == ResponseDecision::Block {
+        let payload_str = serde_json::to_string(&payload.response_payload).unwrap_or_default();
+        let stored = StoredAuditEvent {
+            event_id: Uuid::new_v4().to_string(),
+            agent_id: payload.agent_id.clone(),
+            tenant_id: None,
+            framework: "response-scan".to_string(),
+            action_type: ActionType::Custom,
+            tool_name: payload.tool_name.clone(),
+            input_sha256: hex::encode(Sha256::digest(payload_str.as_bytes())),
+            decision: GovernanceDecision::Block,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            reasons: result.findings.clone(),
+            review_status: ReviewStatus::NotRequired,
+            risk_score: result.risk_score,
+            usage: None,
+            session_id: payload
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("sessionId"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+        };
+        if let Err(e) = state.audit_store.append(&stored).await {
+            tracing::error!(event_id = %stored.event_id, error = %e, "failed to persist response-block audit event");
+        }
+        if let Some(rl) = state.receipts.as_ref() {
+            rl.record(
+                &stored,
+                None,
+                None,
+                crate::pipeline::receipts::ReceiptContext {
+                    policy_hash: None,
+                    threat_feed_hash: None,
+                    dictum_trace: None,
+                },
+            )
+            .await;
+        }
+    }
 
     Json(result)
 }
@@ -1211,6 +1264,7 @@ async fn list_workspace_rules_handler(
 }
 
 async fn add_workspace_rule_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
     Json(rule): Json<crate::modules::policy::rules_engine::PolicyRule>,

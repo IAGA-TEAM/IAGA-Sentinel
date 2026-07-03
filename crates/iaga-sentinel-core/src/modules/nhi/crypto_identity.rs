@@ -351,30 +351,30 @@ pub fn verify_attestation(
     challenge_id: &str,
     signature: &str,
 ) -> AttestationResult {
-    // CRYPTO-NHI-3: peek the challenge WITHOUT consuming it. A challenge is
-    // single-use, but it must only be consumed by a *successful* verification —
-    // otherwise anyone who guesses a `challenge_id` could call this with the
-    // wrong agent/signature and consume a legitimate agent's challenge
-    // (denial-of-attestation). Expired ones are reaped by
+    // CRYPTO-NHI-3: hold the CHALLENGES lock across the whole check → verify →
+    // consume so the challenge is single-use even under concurrent requests.
+    // Peeking then releasing the lock (as before) let two threads both observe a
+    // still-present challenge and each return `verified` — a replay within the
+    // race window. The challenge is still consumed ONLY on a successful
+    // verification, so a wrong agent/signature cannot burn a legitimate agent's
+    // pending challenge (denial-of-attestation). Expired ones are reaped by
     // `prune_expired_challenges`.
-    let (owner, expires_at, nonce) = {
-        let challenges = CHALLENGES.lock().unwrap_or_else(|e| e.into_inner());
-        match challenges.get(challenge_id) {
-            Some(sc) => (
-                sc.challenge.agent_id.clone(),
-                sc.challenge.expires_at.clone(),
-                sc.challenge.nonce.clone(),
-            ),
-            None => {
-                return AttestationResult {
-                    agent_id: agent_id.to_string(),
-                    verified: false,
-                    spiffe_id: String::new(),
-                    trust_score: 0.0,
-                    reason: "challenge not found or already consumed".into(),
-                    mode: "verified".into(),
-                };
-            }
+    let mut challenges = CHALLENGES.lock().unwrap_or_else(|e| e.into_inner());
+    let (owner, expires_at, nonce) = match challenges.get(challenge_id) {
+        Some(sc) => (
+            sc.challenge.agent_id.clone(),
+            sc.challenge.expires_at.clone(),
+            sc.challenge.nonce.clone(),
+        ),
+        None => {
+            return AttestationResult {
+                agent_id: agent_id.to_string(),
+                verified: false,
+                spiffe_id: String::new(),
+                trust_score: 0.0,
+                reason: "challenge not found or already consumed".into(),
+                mode: "verified".into(),
+            };
         }
     };
 
@@ -404,7 +404,8 @@ pub fn verify_attestation(
         }
     }
 
-    // Verify signature
+    // Verify signature. IDENTITIES is locked *after* CHALLENGES; no other path
+    // holds IDENTITIES while acquiring CHALLENGES, so this ordering can't deadlock.
     let identities = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
     match identities.get(agent_id) {
         Some(stored) => {
@@ -413,11 +414,9 @@ pub fn verify_attestation(
             let trust_score = stored.identity.trust_score;
             drop(identities);
             if verified {
-                // Consume the challenge only now that it was used successfully.
-                CHALLENGES
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(challenge_id);
+                // Consume the challenge only now that it was used successfully,
+                // still under the CHALLENGES lock held above → single-use, race-free.
+                challenges.remove(challenge_id);
             }
             AttestationResult {
                 agent_id: agent_id.to_string(),

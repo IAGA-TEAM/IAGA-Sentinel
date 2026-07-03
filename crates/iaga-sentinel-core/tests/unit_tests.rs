@@ -1746,6 +1746,47 @@ fn test_nhi_challenge_wrong_signature() {
 }
 
 #[test]
+fn test_nhi_challenge_is_single_use_under_concurrency() {
+    // A valid attestation must not be replayable: firing the same
+    // challenge+signature from many threads at once must yield exactly one
+    // `verified` (#17 — peek and consume were not atomic).
+    crypto_identity::register_identity("test-nhi-replay", None, vec![]);
+    let secret =
+        hex::decode(crypto_identity::get_agent_secret_hex("test-nhi-replay").expect("secret"))
+            .expect("valid hex");
+    let challenge = crypto_identity::create_challenge("test-nhi-replay").expect("challenge");
+
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&secret).unwrap();
+    mac.update(challenge.nonce.as_bytes());
+    let signature = std::sync::Arc::new(hex::encode(mac.finalize().into_bytes()));
+    let challenge_id = std::sync::Arc::new(challenge.challenge_id);
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+    let handles: Vec<_> = (0..16)
+        .map(|_| {
+            let (challenge_id, signature, barrier) =
+                (challenge_id.clone(), signature.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                crypto_identity::verify_attestation("test-nhi-replay", &challenge_id, &signature)
+                    .verified
+            })
+        })
+        .collect();
+
+    let verified = handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|&v| v)
+        .count();
+    assert_eq!(
+        verified, 1,
+        "a challenge must verify at most once (no replay)"
+    );
+}
+
+#[test]
 fn test_nhi_capability_token_lifecycle() {
     crypto_identity::register_identity("test-nhi-token", None, vec![]);
     let token =
