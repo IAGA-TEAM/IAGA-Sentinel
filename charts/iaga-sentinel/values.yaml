@@ -1,0 +1,217 @@
+# IAGA Sentinel Helm Chart — default values
+# Override via --set or your own values.yaml.
+
+# Number of replicas (SQLite is single-writer, so scale >1 only with Postgres)
+replicaCount: 1
+
+image:
+  repository: ghcr.io/edoardobambini/iaga-sentinel
+  tag: v1.8.1
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 4010
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: iaga-sentinel.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+# Health probes
+livenessProbe:
+  path: /health
+  initialDelaySeconds: 15
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  path: /health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+# -- Environment configuration
+# Most IAGA Sentinel env vars are documented in DATA_HANDLING.md.
+config:
+  openMode: false
+  receiptCapture: false
+  databaseUrl: ""
+  nhiMasterSeed: ""
+  signerKeyPath: /app/keys/receipt_signer.ed25519
+  pluginDir: /app/plugins
+  threatFeed: /app/config/threat-intel.toml
+  envDenylist: /app/config/env-denylist.toml
+  reasoningModels: ""
+  cleanupIntervalSecs: ""
+  cleanupTtlSecs: ""
+
+  # Additional plain env vars
+  extraEnv: {}
+  # Additional envFrom sources
+  envFrom: []
+  # - secretRef:
+  #     name: my-secret
+
+# Policy configuration (iaga-sentinel.yaml)
+policy:
+  # Inline policy YAML content (templated string)
+  config: ""
+  # Name of an existing ConfigMap containing the policy file
+  existingConfigMap: ""
+
+# Dictum policy files to mount at /app/examples/dictum/
+dictum:
+  enabled: false
+  existingConfigMap: ""
+
+# Threat intel file content (mounted at config.threatFeed path)
+threatIntel:
+  enabled: false
+  content: ""
+  existingConfigMap: ""
+
+# Environment variable denylist extension (mounted at config.envDenylist path)
+envDenylist:
+  enabled: false
+  content: ""
+  existingConfigMap: ""
+
+# WASM plugins
+plugins:
+  enabled: false
+  existingConfigMap: ""
+
+# Secrets
+secrets:
+  # Receipt signing Ed25519 key (hex). Auto-generated if empty.
+  receiptSignerKey: ""
+  # NHI master seed (hex). Random per process if empty.
+  nhiMasterSeed: ""
+  # API keys for auth. The first key is also used by the server if none exist.
+  apiKeys: []
+  # - name: admin
+  #   key: ""
+  # Existing secret name (takes precedence over individual values)
+  existingSecret: ""
+
+# SQLite persistence
+persistence:
+  enabled: true
+  size: 1Gi
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  annotations: {}
+  existingClaim: ""
+  # Keys persistence (receipt verification keys).
+  # Ed25519 receipt keys must survive pod restarts to keep previously issued
+  # receipts verifiable.  Change to emptyDir only if you understand the risk.
+  keys:
+    enabled: true
+    size: 100Mi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    annotations: {}
+    existingClaim: ""
+
+# Postgres configuration (alternative to SQLite)
+postgres:
+  enabled: false
+  url: ""
+  existingSecret: ""
+  existingSecretKey: "database-url"
+
+# Network policy
+networkPolicy:
+  enabled: false
+  ingressRules: []
+  egressRules:
+    # DNS resolution must be allowed for any outbound connectivity
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+extraVolumes: []
+extraVolumeMounts: []
+sidecars: []

@@ -1,0 +1,262 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "iaga-sentinel.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "iaga-sentinel.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "iaga-sentinel.serviceAccountName" . }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            {{- if not (and .Values.postgres.enabled .Values.postgres.existingSecret) }}
+            - name: DATABASE_URL
+              value: {{ include "iaga-sentinel.databaseUrl" . | quote }}
+            {{- end }}
+            - name: IAGA_SENTINEL_OPEN_MODE
+              value: {{ .Values.config.openMode | quote }}
+            - name: IAGA_SENTINEL_RECEIPT_CAPTURE
+              value: {{ .Values.config.receiptCapture | quote }}
+            - name: IAGA_SENTINEL_SIGNER_KEY_PATH
+              value: {{ .Values.config.signerKeyPath | quote }}
+            {{- with .Values.config.pluginDir }}
+            - name: IAGA_SENTINEL_PLUGIN_DIR
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.threatFeed }}
+            - name: IAGA_SENTINEL_THREAT_FEED
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.envDenylist }}
+            - name: IAGA_SENTINEL_ENV_DENYLIST
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.reasoningModels }}
+            - name: IAGA_SENTINEL_REASONING_MODELS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.cleanupIntervalSecs }}
+            - name: IAGA_SENTINEL_CLEANUP_INTERVAL_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.cleanupTtlSecs }}
+            - name: IAGA_SENTINEL_CLEANUP_TTL_SECS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- range $key, $val := .Values.config.extraEnv }}
+            - name: {{ $key }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- if not .Values.secrets.existingSecret }}
+            - name: IAGA_SENTINEL_NHI_MASTER_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "iaga-sentinel.fullname" . }}
+                  key: nhi-master-seed
+                  optional: true
+            - name: IAGA_SENTINEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "iaga-sentinel.fullname" . }}
+                  key: api-keys
+                  optional: true
+            {{- else }}
+            - name: IAGA_SENTINEL_NHI_MASTER_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: nhi-master-seed
+                  optional: true
+            - name: IAGA_SENTINEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret }}
+                  key: api-keys
+                  optional: true
+            {{- end }}
+            {{- if .Values.postgres.enabled }}
+            {{- if .Values.postgres.existingSecret }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.existingSecret }}
+                  key: {{ .Values.postgres.existingSecretKey }}
+            {{- end }}
+            {{- end }}
+          {{- with .Values.config.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or .Values.livenessProbe.enabled .Values.readinessProbe.enabled }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            httpGet:
+              path: {{ .path }}
+              port: http
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            httpGet:
+              path: {{ .path }}
+              port: http
+            initialDelaySeconds: {{ .initialDelaySeconds }}
+            periodSeconds: {{ .periodSeconds }}
+            timeoutSeconds: {{ .timeoutSeconds }}
+            failureThreshold: {{ .failureThreshold }}
+          {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/iaga-sentinel.yaml
+              subPath: iaga-sentinel.yaml
+              readOnly: true
+            {{- if not .Values.postgres.enabled }}
+            {{- if .Values.persistence.enabled }}
+            - name: data
+              mountPath: /app/data
+            {{- end }}
+            {{- end }}
+            - name: keys
+              mountPath: /home/iaga/.iaga-sentinel/keys
+            {{- if or .Values.secrets.receiptSignerKey .Values.secrets.existingSecret }}
+            - name: signer-key
+              mountPath: {{ .Values.config.signerKeyPath }}
+              subPath: receipt-signer-key
+              readOnly: true
+            {{- end }}
+            {{- if .Values.dictum.enabled }}
+            - name: dictum
+              mountPath: /app/examples/dictum
+              readOnly: true
+            {{- end }}
+            {{- if .Values.threatIntel.enabled }}
+            - name: threat-intel
+              mountPath: {{ .Values.config.threatFeed | default "/app/config/threat-intel.toml" | dir }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.envDenylist.enabled }}
+            - name: env-denylist
+              mountPath: {{ .Values.config.envDenylist | default "/app/config/env-denylist.toml" | dir }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.plugins.enabled }}
+            - name: plugins
+              mountPath: {{ .Values.config.pluginDir | default "/app/plugins" }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Values.policy.existingConfigMap | default (include "iaga-sentinel.fullname" . | printf "%s-config") }}
+        - name: keys
+          {{- if .Values.persistence.keys.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.keys.existingClaim | default (printf "%s-keys" (include "iaga-sentinel.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if or .Values.secrets.receiptSignerKey .Values.secrets.existingSecret }}
+        - name: signer-key
+          secret:
+            secretName: {{ .Values.secrets.existingSecret | default (include "iaga-sentinel.fullname" .) }}
+            optional: true
+            items:
+              - key: receipt-signer-key
+                path: receipt-signer-key
+        {{- end }}
+        {{- if not .Values.postgres.enabled }}
+        {{- if .Values.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "iaga-sentinel.fullname" . | printf "%s-data") }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.dictum.enabled }}
+        - name: dictum
+          configMap:
+            name: {{ .Values.dictum.existingConfigMap | default (include "iaga-sentinel.fullname" . | printf "%s-dictum") }}
+        {{- end }}
+        {{- if .Values.threatIntel.enabled }}
+        - name: threat-intel
+          configMap:
+            name: {{ .Values.threatIntel.existingConfigMap | default (include "iaga-sentinel.fullname" . | printf "%s-threat-intel") }}
+        {{- end }}
+        {{- if .Values.envDenylist.enabled }}
+        - name: env-denylist
+          configMap:
+            name: {{ .Values.envDenylist.existingConfigMap | default (include "iaga-sentinel.fullname" . | printf "%s-env-denylist") }}
+        {{- end }}
+        {{- if .Values.plugins.enabled }}
+        - name: plugins
+          configMap:
+            name: {{ .Values.plugins.existingConfigMap | default (include "iaga-sentinel.fullname" . | printf "%s-plugins") }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.sidecars }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}

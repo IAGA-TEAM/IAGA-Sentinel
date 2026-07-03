@@ -1,0 +1,187 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: iaga-sentinel
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: iaga-sentinel
+  namespace: iaga-sentinel
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: iaga-sentinel-data
+  namespace: iaga-sentinel
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: iaga-sentinel-config
+  namespace: iaga-sentinel
+data:
+  iaga-sentinel.yaml: |
+    profiles:
+      - agentId: builder-01
+        workspaceId: ws-default
+        framework: langchain
+        role: builder
+        approvedTools:
+          - file.read
+          - file.write
+          - http.fetch
+        approvedSecrets:
+          - OPENAI_API_KEY
+        baselineActionTypes:
+          - file_read
+          - file_write
+          - http
+    workspaces:
+      - workspaceId: ws-default
+        allowedProtocols:
+          - mcp
+          - http-function
+        allowedDomains:
+          - "*.openai.com"
+          - "api.anthropic.com"
+        tools:
+          - toolName: file.read
+            allowedActionTypes:
+              - file_read
+            maxDecision: allow
+            requiresHumanReview: false
+          - toolName: file.write
+            allowedActionTypes:
+              - file_write
+            maxDecision: review
+            requiresHumanReview: false
+          - toolName: http.fetch
+            allowedActionTypes:
+              - http
+            maxDecision: allow
+            requiresHumanReview: false
+    vault: []
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iaga-sentinel
+  namespace: iaga-sentinel
+  labels:
+    app.kubernetes.io/name: iaga-sentinel
+    app.kubernetes.io/instance: iaga-sentinel
+    app.kubernetes.io/version: "1.8.1"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: iaga-sentinel
+      app.kubernetes.io/instance: iaga-sentinel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: iaga-sentinel
+        app.kubernetes.io/instance: iaga-sentinel
+    spec:
+      serviceAccountName: iaga-sentinel
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: iaga-sentinel
+          image: ghcr.io/edoardobambini/iaga-sentinel:v1.8.1
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          ports:
+            - name: http
+              containerPort: 4010
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "4010"
+            - name: DATABASE_URL
+              value: "sqlite:///app/data/iaga_sentinel.db?mode=rwc"
+            - name: IAGA_SENTINEL_OPEN_MODE
+              value: "false"
+            - name: IAGA_SENTINEL_RECEIPT_CAPTURE
+              value: "false"
+            - name: IAGA_SENTINEL_SIGNER_KEY_PATH
+              value: /app/keys/receipt_signer.ed25519
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: config
+              mountPath: /app/iaga-sentinel.yaml
+              subPath: iaga-sentinel.yaml
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+            - name: keys
+              mountPath: /home/iaga/.iaga-sentinel/keys
+      volumes:
+        - name: config
+          configMap:
+            name: iaga-sentinel-config
+        - name: keys
+          emptyDir: {}
+        - name: data
+          persistentVolumeClaim:
+            claimName: iaga-sentinel-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: iaga-sentinel
+  namespace: iaga-sentinel
+  labels:
+    app.kubernetes.io/name: iaga-sentinel
+    app.kubernetes.io/instance: iaga-sentinel
+spec:
+  type: ClusterIP
+  ports:
+    - port: 4010
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: iaga-sentinel
+    app.kubernetes.io/instance: iaga-sentinel

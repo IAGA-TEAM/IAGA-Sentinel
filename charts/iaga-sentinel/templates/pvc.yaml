@@ -1,0 +1,43 @@
+{{- if and .Values.persistence.enabled (not .Values.postgres.enabled) (not .Values.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-data
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+  {{- with .Values.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | quote }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.persistence.keys.enabled (not .Values.persistence.keys.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-keys
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+  {{- with .Values.persistence.keys.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.keys.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.keys.size | quote }}
+  {{- with .Values.persistence.keys.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-config
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+data:
+  iaga-sentinel.yaml: |
+{{ .Values.policy.config | default "" | indent 4 }}
+---
+{{- if .Values.dictum.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-dictum
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+data: {}
+{{- end }}
+---
+{{- if .Values.threatIntel.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-threat-intel
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+data:
+  threat-intel.toml: |
+{{ .Values.threatIntel.content | default "" | indent 4 }}
+{{- end }}
+---
+{{- if .Values.envDenylist.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-env-denylist
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+data:
+  env-denylist.toml: |
+{{ .Values.envDenylist.content | default "" | indent 4 }}
+{{- end }}
+---
+{{- if .Values.plugins.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iaga-sentinel.fullname" . }}-plugins
+  labels:
+    {{- include "iaga-sentinel.labels" . | nindent 4 }}
+data: {}
+{{- end }}

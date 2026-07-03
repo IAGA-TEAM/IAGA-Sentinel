@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: iaga-sentinel
+
+resources:
+  - deployment.yaml
+
+commonLabels:
+  app.kubernetes.io/name: iaga-sentinel
+  app.kubernetes.io/part-of: iaga-sentinel

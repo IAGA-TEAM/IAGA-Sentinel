@@ -1,0 +1,26 @@
+apiVersion: v2
+name: iaga-sentinel
+description: IAGA Sentinel — EU AI Act conformity evidence layer for AI agents
+type: application
+version: 0.1.0
+appVersion: 1.8.1
+kubeVersion: ">= 1.24"
+home: https://iaga.tech
+icon: https://iaga.tech/icon.png
+sources:
+  - https://github.com/EdoardoBambini/IAGA-Sentinel
+keywords:
+  - ai-governance
+  - eu-ai-act
+  - audit-trail
+  - ed25519
+  - conformity
+  - agent-security
+maintainers:
+  - name: Edoardo Bambini
+    email: info@iaga.tech
+    url: https://github.com/EdoardoBambini
+annotations:
+  artifacthub.io/category: security
+  artifacthub.io/license: BUSL-1.1
+  artifacthub.io/prerelease: "false"
