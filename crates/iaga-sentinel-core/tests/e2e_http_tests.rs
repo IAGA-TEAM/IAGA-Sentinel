@@ -790,7 +790,19 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
     let agent = auth_client(&agent_key);
 
     // The administrative surface rejects the agent key with 403.
-    let admin_get_endpoints = ["/v1/auth/keys", "/v1/webhooks", "/v1/webhooks/dlq"];
+    let admin_get_endpoints = [
+        "/v1/auth/keys",
+        "/v1/webhooks",
+        "/v1/webhooks/dlq",
+        // Cross-agent audit/receipt reads must be admin-only (issue #18): an
+        // agent key must not enumerate other agents' events, risk scores, or
+        // signed receipt chains.
+        "/v1/audit",
+        "/v1/audit/export?format=csv",
+        "/v1/audit/stats",
+        "/v1/receipts",
+        "/v1/receipts/any-run",
+    ];
     for path in admin_get_endpoints {
         let resp = agent
             .get(format!("{}{}", server.base_url(), path))
@@ -833,6 +845,13 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
         (
             "/v1/nhi/identities",
             serde_json::json!({ "agentId": "victim-agent" }),
+        ),
+        // Adaptive risk weights are process-global across all agents (issue
+        // #19): an agent key must not floor them via feedback and degrade
+        // static-pattern detection for everyone.
+        (
+            "/v1/risk/feedback",
+            serde_json::json!({ "feedback": "false_positive" }),
         ),
     ];
     for (path, body) in admin_post_endpoints {

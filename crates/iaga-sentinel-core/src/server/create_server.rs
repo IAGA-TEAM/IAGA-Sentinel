@@ -383,6 +383,7 @@ async fn inspect_handler(
 // ── Audit ──
 
 async fn audit_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<StoredAuditEvent>>, SentinelError> {
     let events = state.audit_store.list(100).await?;
@@ -410,6 +411,7 @@ struct AuditExportQuery {
 }
 
 async fn audit_export_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<AuditExportQuery>,
 ) -> Result<impl IntoResponse, SentinelError> {
@@ -463,6 +465,7 @@ async fn audit_export_handler(
 }
 
 async fn audit_stats_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AuditStats>, SentinelError> {
     let stats = state.audit_store.stats().await?;
@@ -832,7 +835,10 @@ struct FeedbackBody {
     feedback: String,
 }
 
-async fn risk_feedback_handler(Json(body): Json<FeedbackBody>) -> Json<serde_json::Value> {
+async fn risk_feedback_handler(
+    _admin: RequireAdmin,
+    Json(body): Json<FeedbackBody>,
+) -> Json<serde_json::Value> {
     adaptive_scorer::apply_feedback(&body.feedback);
     let weights = adaptive_scorer::get_current_weights();
     Json(serde_json::json!({
@@ -1319,6 +1325,7 @@ fn default_receipts_limit() -> u32 {
 }
 
 async fn receipts_list_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<ReceiptsQuery>,
 ) -> Json<serde_json::Value> {
@@ -1345,6 +1352,7 @@ async fn receipts_list_handler(
 }
 
 async fn receipts_run_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(run_id): Path<String>,
 ) -> Json<serde_json::Value> {
