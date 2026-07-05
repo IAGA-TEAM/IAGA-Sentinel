@@ -177,6 +177,8 @@ paths:
                   $ref: "#/components/schemas/StoredAuditEvent"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -233,6 +235,8 @@ paths:
                 type: string
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -250,6 +254,8 @@ paths:
                 $ref: "#/components/schemas/AuditStats"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1060,6 +1066,8 @@ paths:
                 $ref: "#/components/schemas/RiskFeedbackResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/sandbox/pending:
     get:
@@ -1536,6 +1544,8 @@ paths:
                 $ref: "#/components/schemas/ReceiptsListResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/receipts/{run_id}:
     get:
@@ -1557,6 +1567,8 @@ paths:
                 $ref: "#/components/schemas/ReceiptRunResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   # ── Cost control (1.5, feature-gated) ──
   /v1/cost/summary:

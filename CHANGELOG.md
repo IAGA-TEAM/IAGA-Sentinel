@@ -15,6 +15,22 @@ early-access list.
 
 ---
 
+## [Unreleased]
+
+### Security
+
+- **Audit, receipt, and risk-feedback endpoints now require an admin-scoped
+  key.** `GET /v1/audit`, `/v1/audit/export`, `/v1/audit/stats`, `/v1/receipts`,
+  and `/v1/receipts/{run_id}` sat behind auth but not behind `RequireAdmin`, so
+  an agent-scoped key could enumerate cross-agent audit events, risk scores, and
+  signed receipt chains (#18). `POST /v1/risk/feedback` was likewise unguarded,
+  letting an agent key floor the process-global adaptive risk weights and
+  degrade static-pattern detection for every agent (#19). All six now return
+  `403 admin_scope_required`, matching the existing admin surface; the OpenAPI
+  spec documents the `403`.
+
+---
+
 ## [1.8.1], 2026-06-28
 
 A **rebuilt Operator Console** and **cost visibility on by default**. The

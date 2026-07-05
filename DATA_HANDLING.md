@@ -33,7 +33,7 @@ stable order; fields that are empty or absent are omitted from the JSON.
 | `run_id` | string | always | Identifier of the run this receipt belongs to. |
 | `seq` | integer | always | Position in the chain, starting at 0 and incrementing by 1. |
 | `parent_hash` | string or null | always | SHA-256 of the previous receipt body, `null` at `seq` 0. |
-| `input_hash` | string | always | SHA-256 over the event's identifying fields, not the raw payload (see below). |
+| `input_hash` | string | always | SHA-256 binding the action content: the agent id, the tool name, and a SHA-256 digest of the canonical payload. The raw payload itself is never included (see below). |
 | `policy_hash` | string | always | SHA-256 of the compiled policy bundle (or a default placeholder when no Dictum overlay is loaded). |
 | `verdict` | enum | always | `allow`, `review`, or `block`. |
 | `reasons` | string array | usually | Short machine reasons for the verdict; omitted when empty. |
@@ -49,10 +49,11 @@ stable order; fields that are empty or absent are omitted from the JSON.
 | `apl_eval_trace` | object | opt-in | Policy evaluation trace. Present only under drift-capture; otherwise omitted. |
 | `ml_inference_inputs` | object | opt-in | Per-model tokenized-input digests (hashes, never raw tokens). Present only under drift-capture; otherwise omitted. |
 
-`input_hash` is a hash, not the input. In the default build it is a SHA-256 computed over
-the event's identifying fields (event id, agent id, tool name), so the receipt does not
-carry the request body or its arguments. `policy_hash` is likewise a digest of the compiled
-policy, not the policy text.
+`input_hash` is a hash, not the input. In the default build it is a SHA-256 over the agent
+id, the tool name, and a SHA-256 digest of the canonical request payload, so it is bound to
+the action's content (`rm -rf /` and `ls` produce different hashes) while the receipt still
+does not carry the request body or its arguments, only the digest. `policy_hash` is likewise
+a digest of the compiled policy, not the policy text.
 
 A real default receipt, exported with `iaga replay <run_id> --export chain.json`, looks
 like this. Note the absence of any raw command, path, or argument:
