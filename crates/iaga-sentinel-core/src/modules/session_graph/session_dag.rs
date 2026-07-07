@@ -520,9 +520,11 @@ pub fn add_tool_call_to_session(
     let attacks = match_attack_signatures(session);
 
     if attacks.iter().any(|a| a.severity == "critical") {
+        if !session.blocked {
+            session.block_count += 1;
+        }
         session.blocked = true;
         session.blocked_at = now_ms();
-        session.block_count += 1;
         session.block_reason = Some(format!(
             "attack pattern: {}",
             attacks
