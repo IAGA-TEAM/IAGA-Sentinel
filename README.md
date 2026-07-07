@@ -18,6 +18,7 @@
   <img src="https://img.shields.io/badge/EU%20AI%20Act-supports%20Art.%2012%20evidence-0B0F0E?style=flat-square" alt="Supports EU AI Act Article 12 record-keeping" />
   <img src="https://img.shields.io/badge/Rust-stable-0B0F0E?style=flat-square" alt="Rust" />
   <a href="https://github.com/EdoardoBambini/IAGA-Sentinel/actions/workflows/ci.yml"><img src="https://github.com/EdoardoBambini/IAGA-Sentinel/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://discord.gg/QpcMQqex"><img src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Join the IAGA Sentinel Discord" /></a>
 </p>
 
 <p align="center">
