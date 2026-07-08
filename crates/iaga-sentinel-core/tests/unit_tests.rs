@@ -931,6 +931,140 @@ fn test_policy_full_url_to_allowed_host_is_not_blocked() {
 }
 
 #[test]
+fn test_policy_url_field_alias_is_domain_checked() {
+    // issue #20: a URL placed in `url` (not `destination`) must still be
+    // host-checked against the allowlist, not silently allowed.
+    let mut payload = HashMap::new();
+    payload.insert(
+        "url".to_string(),
+        serde_json::Value::String("https://evil.com/exfil".to_string()),
+    );
+    let request = make_request("fetch_tool", ActionType::Http, payload);
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["fetch_tool"],
+        vec![ActionType::Http],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "fetch_tool",
+            vec![ActionType::Http],
+            false,
+            GovernanceDecision::Allow,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec!["api.example.com"],
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert_eq!(
+        eval.minimum_decision,
+        GovernanceDecision::Block,
+        "A URL in the `url` field to an off-domain host must be blocked"
+    );
+    assert!(eval.findings.iter().any(|f| f.contains("outside allowed")));
+}
+
+#[test]
+fn test_policy_url_field_alias_to_allowed_host_is_not_blocked() {
+    // The `url` alias must resolve to its host and pass when on the allowlist.
+    let mut payload = HashMap::new();
+    payload.insert(
+        "url".to_string(),
+        serde_json::Value::String("https://api.example.com/x".to_string()),
+    );
+    let request = make_request("fetch_tool", ActionType::Http, payload);
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["fetch_tool"],
+        vec![ActionType::Http],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "fetch_tool",
+            vec![ActionType::Http],
+            false,
+            GovernanceDecision::Allow,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec!["api.example.com"],
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert_eq!(
+        eval.minimum_decision,
+        GovernanceDecision::Allow,
+        "A URL in `url` to an allowed host must not be blocked"
+    );
+    assert!(!eval.findings.iter().any(|f| f.contains("outside allowed")));
+}
+
+#[test]
+fn test_policy_http_without_destination_fails_closed_under_allowlist() {
+    // issue #20: an HTTP egress action with NO recognizable destination field
+    // must not slip past an active egress allowlist (fail closed).
+    let request = make_request("fetch_tool", ActionType::Http, HashMap::new());
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["fetch_tool"],
+        vec![ActionType::Http],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "fetch_tool",
+            vec![ActionType::Http],
+            false,
+            GovernanceDecision::Allow,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec!["api.example.com"],
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert_eq!(
+        eval.minimum_decision,
+        GovernanceDecision::Block,
+        "HTTP egress with no destination under an allowlist must fail closed"
+    );
+    assert!(eval
+        .findings
+        .iter()
+        .any(|f| f.contains("no recognizable destination")));
+}
+
+#[test]
+fn test_policy_http_without_destination_allowed_when_no_allowlist() {
+    // Protocol-only Http (a2a/acp messaging, no web egress) must stay allowed
+    // when the workspace configures no egress allowlist: the fail-closed guard
+    // is gated on a non-empty `allowed_domains`.
+    let request = make_request("fetch_tool", ActionType::Http, HashMap::new());
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["fetch_tool"],
+        vec![ActionType::Http],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "fetch_tool",
+            vec![ActionType::Http],
+            false,
+            GovernanceDecision::Allow,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec![], // no egress allowlist configured
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert!(
+        !eval
+            .findings
+            .iter()
+            .any(|f| f.contains("no recognizable destination") || f.contains("outside allowed")),
+        "no egress finding expected when the workspace sets no allowlist"
+    );
+}
+
+#[test]
 fn test_block_reasons_surface_the_cause() {
     // A Block forced by the policy layer must carry its human-readable cause in
     // the risk reasons, not just the vague "escalated by security layers" note.
