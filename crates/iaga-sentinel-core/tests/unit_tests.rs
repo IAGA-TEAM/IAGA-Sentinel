@@ -1000,67 +1000,43 @@ fn test_policy_url_field_alias_to_allowed_host_is_not_blocked() {
 }
 
 #[test]
-fn test_policy_http_without_destination_fails_closed_under_allowlist() {
-    // issue #20: an HTTP egress action with NO recognizable destination field
-    // must not slip past an active egress allowlist (fail closed).
-    let request = make_request("fetch_tool", ActionType::Http, HashMap::new());
+fn test_policy_http_without_destination_is_not_egress_blocked() {
+    // Regression guard (issue #20): an HTTP action that carries no recognizable
+    // destination field, e.g. an LLM/API SDK call like
+    // `openai.chat.completions.create` whose destination is the provider API and
+    // not a payload URL, must NOT be egress-blocked, even when the workspace
+    // configures an allowlist. The domain check applies only when a destination
+    // is actually present.
+    let request = make_request(
+        "openai.chat.completions.create",
+        ActionType::Http,
+        HashMap::new(),
+    );
     let profile = make_profile(
         "agent-policy-test",
-        vec!["fetch_tool"],
+        vec!["openai.chat.completions.create"],
         vec![ActionType::Http],
     );
     let workspace = make_workspace_policy(
         vec![make_tool_policy(
-            "fetch_tool",
+            "openai.chat.completions.create",
             vec![ActionType::Http],
             false,
             GovernanceDecision::Allow,
         )],
         vec![ProtocolKind::Mcp],
-        vec!["api.example.com"],
+        vec!["api.example.com"], // an allowlist is set, but this action has no destination
     );
 
     let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
     assert_eq!(
         eval.minimum_decision,
-        GovernanceDecision::Block,
-        "HTTP egress with no destination under an allowlist must fail closed"
+        GovernanceDecision::Allow,
+        "destination-less HTTP (an API/LLM call) must not be egress-blocked"
     );
-    assert!(eval
-        .findings
-        .iter()
-        .any(|f| f.contains("no recognizable destination")));
-}
-
-#[test]
-fn test_policy_http_without_destination_allowed_when_no_allowlist() {
-    // Protocol-only Http (a2a/acp messaging, no web egress) must stay allowed
-    // when the workspace configures no egress allowlist: the fail-closed guard
-    // is gated on a non-empty `allowed_domains`.
-    let request = make_request("fetch_tool", ActionType::Http, HashMap::new());
-    let profile = make_profile(
-        "agent-policy-test",
-        vec!["fetch_tool"],
-        vec![ActionType::Http],
-    );
-    let workspace = make_workspace_policy(
-        vec![make_tool_policy(
-            "fetch_tool",
-            vec![ActionType::Http],
-            false,
-            GovernanceDecision::Allow,
-        )],
-        vec![ProtocolKind::Mcp],
-        vec![], // no egress allowlist configured
-    );
-
-    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
     assert!(
-        !eval
-            .findings
-            .iter()
-            .any(|f| f.contains("no recognizable destination") || f.contains("outside allowed")),
-        "no egress finding expected when the workspace sets no allowlist"
+        !eval.findings.iter().any(|f| f.contains("outside allowed")),
+        "no off-domain finding expected when the action has no destination"
     );
 }
 

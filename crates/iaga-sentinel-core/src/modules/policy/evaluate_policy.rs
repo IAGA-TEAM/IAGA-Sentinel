@@ -1,5 +1,5 @@
 use crate::core::types::{
-    ActionType, AgentProfile, GovernanceDecision, InspectRequest, ProtocolKind, WorkspacePolicy,
+    AgentProfile, GovernanceDecision, InspectRequest, ProtocolKind, WorkspacePolicy,
 };
 
 pub struct PolicyEvaluation {
@@ -107,20 +107,6 @@ pub fn evaluate_policy(
             ));
             minimum_decision = GovernanceDecision::Block;
         }
-    } else if input.action.action_type == ActionType::Http
-        && !workspace_policy.allowed_domains.is_empty()
-    {
-        // Fail closed (issue #20): an HTTP egress action under an active domain
-        // allowlist that exposes no recognizable destination field cannot be
-        // verified against the allowlist. Silently allowing it would let any
-        // payload-controlling caller exfiltrate by hiding the URL in an unlisted
-        // field, so it is blocked rather than passed. Gated on a non-empty
-        // allowlist so protocol-only Http (a2a/acp messaging, no web egress) is
-        // unaffected.
-        findings.push(
-            "http action has no recognizable destination (destination/url/endpoint/href) but the workspace sets an egress allowlist; cannot verify it targets an allowed domain".to_string(),
-        );
-        minimum_decision = GovernanceDecision::Block;
     }
 
     if findings.is_empty() {

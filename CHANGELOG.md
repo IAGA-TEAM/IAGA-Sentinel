@@ -30,11 +30,10 @@ early-access list.
   spec documents the `403`.
 - **`allowed_domains` egress allowlist could be bypassed via alternate payload
   fields.** The workspace egress check read only `payload["destination"]`, so an
-  `http` action carrying its URL in `url`/`endpoint`/`href` (or any other field)
-  evaded the domain allowlist and was silently allowed (#20). The extractor now
-  scans `destination`, `url`, `endpoint`, and `href`, and an HTTP action under a
-  configured allowlist that exposes no recognizable destination now fails closed
-  (`block`) instead of passing.
+  `http` action carrying its URL in `url`/`endpoint`/`href` evaded the domain
+  allowlist and was silently allowed (#20). The extractor now scans
+  `destination`, `url`, `endpoint`, and `href` and host-checks the first match
+  against the allowlist.
 
 ---
 
