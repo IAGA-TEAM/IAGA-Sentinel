@@ -3104,6 +3104,16 @@ components:
           type: object
           additionalProperties: true
           description: Chain verification outcome for the run
+        receiptDropped:
+          type: boolean
+          description: >
+            True when at least one signed receipt for this run was lost to an
+            append error or retry exhaustion, so the SQL audit trail and the
+            signed chain diverge (issue #23). `verify` above reflects only the
+            receipts that are present and can report valid despite the gap.
+        droppedReceipts:
+          type: integer
+          description: Count of receipts dropped for this run (0 when none).
 
     # ── Cost control (1.5) ──
     CostSummaryResponse:

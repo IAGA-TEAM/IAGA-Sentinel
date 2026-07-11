@@ -35,6 +35,17 @@ early-access list.
   `destination`, `url`, `endpoint`, and `href` and host-checks the first match
   against the allowlist.
 
+### Fixed
+
+- **Silent receipt-drop is now visible on the read API.** When a signed receipt
+  is lost (append error or retry exhaustion) the SQL audit row still exists but
+  the signed chain has a gap; `GET /v1/receipts/{run_id}` reported only the
+  receipts that were present and could show the chain as valid with no signal of
+  the divergence. The response now carries `receiptDropped` (bool) and
+  `droppedReceipts` (count) so a compliance inspector sees the gap (#23). The
+  pipeline still returns success: receipts stay advisory evidence and never fail
+  the governance decision.
+
 ---
 
 ## [1.8.1], 2026-06-28

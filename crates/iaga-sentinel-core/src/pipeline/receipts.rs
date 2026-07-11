@@ -79,7 +79,7 @@ pub trait ReceiptLogger: Send + Sync {
     }
 
     async fn get_run_json(&self, _run_id: &str) -> serde_json::Value {
-        serde_json::json!({ "receipts": [], "verify": null })
+        serde_json::json!({ "receipts": [], "verify": null, "receiptDropped": false })
     }
 
     fn signer_key_id(&self) -> Option<String> {
@@ -155,6 +155,13 @@ mod signed {
         /// would be lower contention; a single global lock is simpler and
         /// adequate for M2 throughput.
         append_guard: Mutex<()>,
+        /// OBS-RECEIPT-DROP / issue #23: per-run count of receipts lost to an
+        /// append error or retry exhaustion. A drop diverges the SQL audit trail
+        /// from the signed chain; recording it per `run_id` lets the read API
+        /// (`GET /v1/receipts/{run_id}`) surface the gap instead of leaving it
+        /// only in the `error!` log and the `receipts.dropped` counter. In-memory
+        /// (process lifetime); the durable operator signals stay the log + metric.
+        dropped_runs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     }
 
     impl SignedReceiptLogger {
@@ -168,6 +175,7 @@ mod signed {
                 signer,
                 policy_hash,
                 append_guard: Mutex::new(()),
+                dropped_runs: std::sync::Mutex::new(std::collections::HashMap::new()),
             }
         }
 
@@ -397,6 +405,12 @@ mod signed {
                 run_id = %run_id,
                 "receipt dropped (append error or retries exhausted); audit trail and signed chain may diverge"
             );
+            // issue #23: record the divergence per run so the read API can surface
+            // it. A compliance inspector comparing audit-event count to chain
+            // length would otherwise see an unexplained gap in the signed material.
+            if let Ok(mut dropped) = self.dropped_runs.lock() {
+                *dropped.entry(run_id.clone()).or_insert(0) += 1;
+            }
             emit_receipt_metric("iaga_sentinel.receipts.dropped");
         }
 
@@ -425,10 +439,21 @@ mod signed {
                 Ok(status) => serde_json::to_value(&status).unwrap_or(serde_json::Value::Null),
                 Err(e) => serde_json::json!({ "error": e.to_string() }),
             };
+            // issue #23: a signed receipt lost for this run means the SQL audit
+            // trail and the signed chain diverge. `verify` above only reflects the
+            // receipts that ARE present, so it can report Valid despite the gap;
+            // this flag is the missing API-visible signal of the divergence.
+            let dropped_receipts = self
+                .dropped_runs
+                .lock()
+                .map(|d| d.get(run_id).copied().unwrap_or(0))
+                .unwrap_or(0);
             serde_json::json!({
                 "runId": run_id,
                 "receipts": serde_json::to_value(&receipts).unwrap_or(serde_json::Value::Null),
                 "verify": verify,
+                "receiptDropped": dropped_receipts > 0,
+                "droppedReceipts": dropped_receipts,
                 "signerKeyId": self.signer.key_id(),
                 "policyHash": self.policy_hash,
             })
@@ -568,6 +593,12 @@ mod signed {
     mod run_id_tests {
         use super::SignedReceiptLogger;
         use crate::core::types::{ActionType, GovernanceDecision, ReviewStatus, StoredAuditEvent};
+        use crate::pipeline::receipts::{ReceiptContext, ReceiptLogger};
+        use async_trait::async_trait;
+        use iaga_sentinel_receipts::{
+            ChainStatus, LocalDiskSigner, Receipt, ReceiptError, ReceiptStore, RunSummary, Signer,
+        };
+        use std::sync::Arc;
 
         fn event(session_id: Option<&str>) -> StoredAuditEvent {
             StoredAuditEvent {
@@ -601,6 +632,61 @@ mod signed {
             assert_eq!(SignedReceiptLogger::run_id(&event(None)), "evt-123");
             // An empty session string is treated as absent.
             assert_eq!(SignedReceiptLogger::run_id(&event(Some(""))), "evt-123");
+        }
+
+        /// A store whose `append` always fails, forcing the retry loop to exhaust
+        /// and drop the receipt (issue #23).
+        struct FailingStore;
+
+        #[async_trait]
+        impl ReceiptStore for FailingStore {
+            async fn append(&self, _r: &Receipt) -> Result<(), ReceiptError> {
+                Err(ReceiptError::ChainViolation {
+                    seq: 0,
+                    reason: "test: append always fails".into(),
+                })
+            }
+            async fn head(&self, _run_id: &str) -> Result<Option<Receipt>, ReceiptError> {
+                Ok(None)
+            }
+            async fn get_run(&self, _run_id: &str) -> Result<Vec<Receipt>, ReceiptError> {
+                Ok(vec![])
+            }
+            async fn verify_chain(&self, _run_id: &str) -> Result<ChainStatus, ReceiptError> {
+                Ok(ChainStatus::Empty)
+            }
+            async fn list_runs(&self, _limit: u32) -> Result<Vec<RunSummary>, ReceiptError> {
+                Ok(vec![])
+            }
+        }
+
+        #[tokio::test]
+        async fn dropped_receipt_is_surfaced_on_get_run_json() {
+            // issue #23: when a receipt is lost (append fails after retries) the
+            // SQL audit row still exists but the signed chain has a gap. The read
+            // API must expose that divergence, not just the log/metric.
+            let logger = SignedReceiptLogger::new(
+                Arc::new(FailingStore) as Arc<dyn ReceiptStore>,
+                Arc::new(LocalDiskSigner::generate()) as Arc<dyn Signer>,
+                "policy-test".to_string(),
+            );
+            // Session-less event -> run_id == event_id ("evt-123").
+            logger
+                .record(&event(None), None, None, ReceiptContext::default())
+                .await;
+
+            let run = logger.get_run_json("evt-123").await;
+            assert_eq!(
+                run["receiptDropped"],
+                serde_json::json!(true),
+                "a dropped receipt must be visible on GET /v1/receipts/{{run_id}}"
+            );
+            assert_eq!(run["droppedReceipts"], serde_json::json!(1));
+
+            // A run that never dropped reports false.
+            let clean = logger.get_run_json("some-other-run").await;
+            assert_eq!(clean["receiptDropped"], serde_json::json!(false));
+            assert_eq!(clean["droppedReceipts"], serde_json::json!(0));
         }
     }
 }
