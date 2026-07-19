@@ -71,8 +71,13 @@ affinity: {}
 topologySpreadConstraints: []
 priorityClassName: ""
 
-# Health probes
+# Health probes.
+# `enabled` is required: deployment.yaml gates the whole probe block on it, so
+# omitting the key (as this file did until 1.9.0) rendered a pod with no
+# liveness and no readiness probe at all. /health is on the unauthenticated
+# router, so probes pass regardless of API-key state.
 livenessProbe:
+  enabled: true
   path: /health
   initialDelaySeconds: 15
   periodSeconds: 30
@@ -80,6 +85,7 @@ livenessProbe:
   failureThreshold: 3
 
 readinessProbe:
+  enabled: true
   path: /health
   initialDelaySeconds: 5
   periodSeconds: 10
@@ -141,14 +147,20 @@ plugins:
 
 # Secrets
 secrets:
-  # Receipt signing Ed25519 key (hex). Auto-generated if empty.
+  # Receipt signing Ed25519 key: the BASE64 encoding of a raw 32-byte seed,
+  # i.e. exactly 44 characters. Not hex — the loader wants 32 raw bytes.
+  #   head -c 32 /dev/urandom | base64
+  # Leave empty to have the server generate one on first boot into the keys
+  # volume, which is the right choice as long as that volume is persistent.
   receiptSignerKey: ""
   # NHI master seed (hex). Random per process if empty.
   nhiMasterSeed: ""
-  # API keys for auth. The first key is also used by the server if none exist.
-  apiKeys: []
-  # - name: admin
-  #   key: ""
+  # An admin API key registered by the server at startup, so a fresh install is
+  # reachable without exec-ing in to run `iaga gen-key`. At least 16 printable
+  # ASCII characters, no whitespace. Idempotent, and never logged.
+  # This is the server-side bootstrap credential; the identically-purposed
+  # client variable in the plug-ins is IAGA_SENTINEL_API_KEY and is separate.
+  bootstrapApiKey: ""
   # Existing secret name (takes precedence over individual values)
   existingSecret: ""
 

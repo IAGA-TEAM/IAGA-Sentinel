@@ -1,3 +1,4 @@
+{{- if .Values.policy.config }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,9 +7,10 @@ metadata:
     {{- include "iaga-sentinel.labels" . | nindent 4 }}
 data:
   iaga-sentinel.yaml: |
-{{ .Values.policy.config | default "" | indent 4 }}
----
+{{ .Values.policy.config | indent 4 }}
+{{- end }}
 {{- if .Values.dictum.enabled }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -17,8 +19,8 @@ metadata:
     {{- include "iaga-sentinel.labels" . | nindent 4 }}
 data: {}
 {{- end }}
----
 {{- if .Values.threatIntel.enabled }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -29,8 +31,8 @@ data:
   threat-intel.toml: |
 {{ .Values.threatIntel.content | default "" | indent 4 }}
 {{- end }}
----
 {{- if .Values.envDenylist.enabled }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -41,8 +43,8 @@ data:
   env-denylist.toml: |
 {{ .Values.envDenylist.content | default "" | indent 4 }}
 {{- end }}
----
 {{- if .Values.plugins.enabled }}
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

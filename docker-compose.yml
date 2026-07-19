@@ -5,12 +5,20 @@ services:
       - "4010:4010"
     volumes:
       - iaga-sentinel-data:/app/data
+      # The Ed25519 receipt signing key lives here. Without a volume it is
+      # regenerated on every container recreation, which changes signer_key_id
+      # and breaks verification of every receipt signed before that point.
+      - iaga-sentinel-keys:/home/iaga/.iaga-sentinel/keys
     environment:
       - PORT=4010
       - DATABASE_URL=sqlite:///app/data/iaga_sentinel.db?mode=rwc
       - IAGA_SENTINEL_OPEN_MODE=false
       - IAGA_SENTINEL_NHI_MASTER_SEED=${IAGA_SENTINEL_NHI_MASTER_SEED}
+      # With open mode off and a fresh database, every route answers 401 until
+      # an admin key exists. Set this and the server registers it at startup.
+      - IAGA_SENTINEL_BOOTSTRAP_API_KEY=${IAGA_SENTINEL_BOOTSTRAP_API_KEY}
     restart: unless-stopped
 
 volumes:
   iaga-sentinel-data:
+  iaga-sentinel-keys:

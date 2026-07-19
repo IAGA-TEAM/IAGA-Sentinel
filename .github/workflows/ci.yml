@@ -45,6 +45,57 @@ jobs:
         # single source of truth, no duplicated CLI flags (1.5.2).
         run: cargo audit
 
+  chart:
+    # The Helm chart shipped four defects that rendered perfectly valid YAML
+    # and still produced a broken deployment (empty policy mounted over the
+    # image's, probes silently absent, a signer-key subPath with nothing to
+    # bind). Rendering the chart in CI catches that class.
+    # ponytail: helm is preinstalled on GitHub runners, so no extra download.
+    name: helm chart renders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint
+        run: helm lint charts/iaga-sentinel
+
+      - name: Default install does not shadow the image's policy
+        run: |
+          set -euo pipefail
+          out="$(helm template t charts/iaga-sentinel)"
+          echo "$out" | grep -q 'subPath: iaga-sentinel.yaml' \
+            && { echo "::error::default values mount an empty policy over the image's"; exit 1; } || true
+          echo "$out" | grep -q 'livenessProbe' \
+            || { echo "::error::liveness probe did not render"; exit 1; }
+          echo "$out" | grep -q 'readinessProbe' \
+            || { echo "::error::readiness probe did not render"; exit 1; }
+
+      - name: An existingSecret without a signer key renders no dangling subPath
+        run: |
+          set -euo pipefail
+          out="$(helm template t charts/iaga-sentinel --set secrets.existingSecret=byo)"
+          if echo "$out" | grep -q 'subPath: receipt-signer-key'; then
+            echo "::error::signer-key subPath rendered with no guaranteed Secret entry; the pod would hang in CreateContainerConfigError"
+            exit 1
+          fi
+
+      - name: A supplied policy is mounted
+        run: |
+          set -euo pipefail
+          helm template t charts/iaga-sentinel \
+            --set-file policy.config=crates/iaga-sentinel-core/iaga-sentinel.example.yaml \
+            | grep -q 'subPath: iaga-sentinel.yaml' \
+            || { echo "::error::a supplied policy was not mounted"; exit 1; }
+
+      - name: A hex signer key is rejected rather than silently truncated
+        run: |
+          set -euo pipefail
+          hex="$(printf 'a%.0s' $(seq 1 64))"
+          if helm template t charts/iaga-sentinel --set secrets.receiptSignerKey="$hex" >/dev/null 2>&1; then
+            echo "::error::a 64-char hex key must be refused: it is valid base64 and would decode to 48 bytes, disabling receipts"
+            exit 1
+          fi
+
   notices:
     # Third-party attribution for the shipped binary must stay in sync with
     # Cargo.lock. Regenerate THIRD_PARTY_NOTICES.md and fail if it drifted.

@@ -22,6 +22,20 @@ spec:
     requests:
       storage: 1Gi
 ---
+# The Ed25519 receipt signing key must survive pod restarts: regenerating it
+# changes signer_key_id and breaks verification of every receipt signed before.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: iaga-sentinel-keys
+  namespace: iaga-sentinel
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -164,7 +178,8 @@ spec:
           configMap:
             name: iaga-sentinel-config
         - name: keys
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: iaga-sentinel-keys
         - name: data
           persistentVolumeClaim:
             claimName: iaga-sentinel-data

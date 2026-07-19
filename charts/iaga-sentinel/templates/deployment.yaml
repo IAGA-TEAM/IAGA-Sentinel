@@ -108,11 +108,11 @@ spec:
                   name: {{ include "iaga-sentinel.fullname" . }}
                   key: nhi-master-seed
                   optional: true
-            - name: IAGA_SENTINEL_API_KEY
+            - name: IAGA_SENTINEL_BOOTSTRAP_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "iaga-sentinel.fullname" . }}
-                  key: api-keys
+                  key: bootstrap-api-key
                   optional: true
             {{- else }}
             - name: IAGA_SENTINEL_NHI_MASTER_SEED
@@ -121,11 +121,11 @@ spec:
                   name: {{ .Values.secrets.existingSecret }}
                   key: nhi-master-seed
                   optional: true
-            - name: IAGA_SENTINEL_API_KEY
+            - name: IAGA_SENTINEL_BOOTSTRAP_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secrets.existingSecret }}
-                  key: api-keys
+                  key: bootstrap-api-key
                   optional: true
             {{- end }}
             {{- if .Values.postgres.enabled }}
@@ -166,10 +166,16 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
+            {{- if or .Values.policy.config .Values.policy.existingConfigMap }}
+            # Only mounted when a policy is actually supplied. Mounting an empty
+            # ConfigMap here would shadow the valid example policy the image
+            # ships at this path, and the server refuses to start with a config
+            # file it cannot parse.
             - name: config
               mountPath: /app/iaga-sentinel.yaml
               subPath: iaga-sentinel.yaml
               readOnly: true
+            {{- end }}
             {{- if not .Values.postgres.enabled }}
             {{- if .Values.persistence.enabled }}
             - name: data
@@ -178,7 +184,13 @@ spec:
             {{- end }}
             - name: keys
               mountPath: /home/iaga/.iaga-sentinel/keys
-            {{- if or .Values.secrets.receiptSignerKey .Values.secrets.existingSecret }}
+            {{- if .Values.secrets.receiptSignerKey }}
+            # Gated on the inline value only. Gating on `existingSecret` too
+            # meant that a Secret without a `receipt-signer-key` entry left the
+            # subPath with nothing to bind, and the pod hung in
+            # CreateContainerConfigError. Bring your own key in an existing
+            # Secret by also setting persistence.keys.existingClaim, or supply
+            # it inline here.
             - name: signer-key
               mountPath: {{ .Values.config.signerKeyPath }}
               subPath: receipt-signer-key
@@ -208,9 +220,11 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
       volumes:
+        {{- if or .Values.policy.config .Values.policy.existingConfigMap }}
         - name: config
           configMap:
             name: {{ .Values.policy.existingConfigMap | default (include "iaga-sentinel.fullname" . | printf "%s-config") }}
+        {{- end }}
         - name: keys
           {{- if .Values.persistence.keys.enabled }}
           persistentVolumeClaim:
@@ -218,11 +232,10 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if or .Values.secrets.receiptSignerKey .Values.secrets.existingSecret }}
+        {{- if .Values.secrets.receiptSignerKey }}
         - name: signer-key
           secret:
             secretName: {{ .Values.secrets.existingSecret | default (include "iaga-sentinel.fullname" .) }}
-            optional: true
             items:
               - key: receipt-signer-key
                 path: receipt-signer-key
