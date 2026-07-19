@@ -13,12 +13,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.9.0-0f9d6b?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/license-BUSL--1.1-0f9d6b?style=flat-square" alt="license" />
-  <img src="https://img.shields.io/badge/EU%20AI%20Act-supports%20Art.%2012%20evidence-0B0F0E?style=flat-square" alt="Supports EU AI Act Article 12 record-keeping" />
-  <img src="https://img.shields.io/badge/Rust-stable-0B0F0E?style=flat-square" alt="Rust" />
-  <a href="https://github.com/EdoardoBambini/IAGA-Sentinel/actions/workflows/ci.yml"><img src="https://github.com/EdoardoBambini/IAGA-Sentinel/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://discord.gg/QpcMQqex"><img src="https://img.shields.io/badge/Discord-join%20the%20community-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Join the IAGA Sentinel Discord" /></a>
+  <img src="docs/media/badge-version.svg" alt="version 1.9.0" />
+  <img src="docs/media/badge-license.svg" alt="license BUSL-1.1" />
+  <img src="docs/media/badge-aiact.svg" alt="Supports EU AI Act Article 12 record-keeping" />
+  <img src="docs/media/badge-rust.svg" alt="Rust stable" />
+  <a href="https://github.com/IAGA-TEAM/IAGA-Sentinel/actions/workflows/ci.yml"><img src="https://github.com/IAGA-TEAM/IAGA-Sentinel/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://discord.gg/QpcMQqex"><img src="docs/media/badge-discord.svg" alt="Join the IAGA Sentinel Discord" /></a>
 </p>
 
 <p align="center">

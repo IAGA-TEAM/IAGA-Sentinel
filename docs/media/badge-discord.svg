@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="195" height="20" role="img" aria-label="Discord: join the community">
+  <title>Discord: join the community</title>
+  <g shape-rendering="crispEdges">
+    <rect width="64" height="20" fill="#555"/>
+    <rect x="64" width="131" height="20" fill="#4149b8"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+    <text x="32" y="14">Discord</text>
+    <text x="130" y="14">join the community</text>
+  </g>
+</svg>
