@@ -17,6 +17,113 @@ early-access list.
 
 ## [Unreleased]
 
+---
+
+## [1.9.0], 2026-07-19
+
+An **evidence-integrity and deployment** release, closing an external code
+review. Three things stop being best-effort: an operator can now demand that no
+verdict ships without its receipt, the governance scope is derived from the
+agent profile instead of the request body, and the deployment artifacts produce
+a server that is actually reachable and keeps its signing key. Default
+behaviour is unchanged and receipt bytes are identical: the fail-closed trade is
+opt-in, and every existing chain still verifies.
+
+This release also folds in the community pull requests merged since 1.8.1
+(#5, #6, #8, #9, #10, #11, #12) and the hardening that shipped with them.
+
+### Added
+
+- **Opt-in fail-closed receipts** (`IAGA_SENTINEL_RECEIPT_FAIL_CLOSED`). A
+  receipt that cannot be signed and persisted normally leaves a gap between the
+  SQL audit trail and the signed chain while the verdict ships anyway. Operators
+  who position on cryptographic evidence can now invert that trade: with the
+  variable set, the governance call fails instead of returning a verdict with no
+  evidence behind it, and a server that cannot build a receipt logger at all
+  refuses to start (`serve`, `proxy`, `mcp-server`, `run`) rather than silently
+  governing unevidenced. **Off by default** — receipts stay advisory evidence and
+  never fail the decision, which keeps the 1.8.1 behaviour byte for byte.
+  Documented limits, because the guarantee has edges: the audit row is written
+  before the receipt so a crash between the two still diverges; a verdict whose
+  receipt was lost emits no SSE event and fires no webhook; and
+  `iaga.response_scan` over MCP records no receipt in either mode.
+- **Startup API-key bootstrap** (`IAGA_SENTINEL_BOOTSTRAP_API_KEY`). With open
+  mode off and a fresh database — what every deployment artifact in this repo
+  configures — the server answered `401` on every route until someone ran
+  `iaga gen-key` by hand, and the resulting key was unknowable to clients
+  configured in advance. The server now registers an operator-supplied admin key
+  at startup, idempotently, and never logs it. Distinct from the client-side
+  `IAGA_SENTINEL_API_KEY` the plug-ins read.
+- **Helm chart and Kubernetes manifests** (#5), with the signer key on a
+  writable volume so receipts can be generated under a read-only root
+  filesystem.
+- CI now renders the Helm chart on every run: default values, a bring-your-own
+  Secret, a supplied policy, and a rejected hex signer key.
+
+### Changed
+
+- **`workspaceId` and `tenantId` are no longer taken from the request body.**
+  The workspace is derived from the agent profile; a request asserting a
+  different one is refused with `403 scope_mismatch` instead of being evaluated
+  against that workspace's thresholds, egress allowlist and tool policy. The
+  tenant is derived from the profile, then the workspace policy; a supplied
+  value is ignored rather than rejected, so existing callers do not break.
+- **A config file that is present but unparseable is now fatal.** Previously the
+  server logged a warning and continued with zero profiles and zero workspaces —
+  configured-looking, governing nothing. A *missing* config file stays
+  non-fatal.
+- The sensitive-env denylist scrubbed from governed child processes grows to 24
+  entries with the bootstrap credential.
+- Docker images publish under `ghcr.io/iaga-team/iaga-sentinel`, matching the
+  repository that owns the release tag. Tags published earlier under the
+  previous namespace still resolve.
+- Documentation honesty pass. The subhead now claims evidence "of every action
+  an agent routes through it"; the sovereignty bullet becomes "Self-hosted, no
+  vendor in the loop" with a claim about IAGA rather than about third parties;
+  the Annex IV date is dropped, since Annex I and Annex III high-risk systems do
+  not share one deadline. In the demo walkthrough the BLOCK beat no longer says
+  the action is "stopped before it runs" — `/v1/inspect` is advisory and returns
+  a verdict without intercepting, while `iaga run` blocks a launch outright — and
+  the REVIEW beat's risk score is corrected from 41 to the 40 a clean first run
+  actually produces.
+
+### Fixed
+
+- **Silent receipt-drop is now visible on the read API.** When a signed receipt
+  is lost (append error or retry exhaustion) the SQL audit row still exists but
+  the signed chain has a gap; `GET /v1/receipts/{run_id}` reported only the
+  receipts that were present and could show the chain as valid with no signal of
+  the divergence. The response now carries `receiptDropped` (bool) and
+  `droppedReceipts` (count) so a compliance inspector sees the gap (#23).
+- **Deployment paths lost the Ed25519 signing key on restart.** Docker Compose
+  persisted only the database and the raw Kubernetes manifest used an `emptyDir`
+  for the key directory, so the signer key was regenerated on every container or
+  pod recreation, changing `signer_key_id` and breaking verification of every
+  receipt signed before that point. Both now persist the key directory, matching
+  what the Helm chart already did.
+- **The Helm chart shipped a server with no policy.** `policy.config` was empty
+  by default but still mounted over `/app/iaga-sentinel.yaml`, shadowing the
+  valid example policy in the image. The mount is now conditional on a policy
+  actually being supplied.
+- **The Helm chart's liveness and readiness probes never rendered**, because
+  `values.yaml` had no `enabled` key for the condition that gated them.
+- **A bring-your-own Secret without a `receipt-signer-key` entry produced a pod
+  stuck in `CreateContainerConfigError`**, because the signer-key `subPath` had
+  nothing to bind. The mount is now gated on the inline value only.
+- **`secrets.receiptSignerKey` was documented as hex but the loader requires 32
+  raw bytes.** A 64-character hex string is itself valid base64, so it was
+  accepted and decoded to 48 bytes, silently disabling receipts. The value is now
+  base64 and a wrong length fails the template render.
+- Receipt append retries back off between attempts, so two writers racing on the
+  same `run_id` against a shared Postgres do not burn all five attempts at once.
+- Session `block_count` no longer double-increments when the FSA and attack
+  detection both fire (#10), the session DAG holds its lock across the full
+  read-mutate cycle (#11), the cost budget check and add are atomic (#12),
+  `EvalBudget::tick` increments after the exhaustion check rather than before
+  (#9), `ReviewRequest` timestamps use the pinned decision time instead of a
+  fresh `Utc::now()` (#8), and a redundant `#![cfg]` in the Dictum overlay is
+  gone (#6).
+
 ### Security
 
 - **Audit, receipt, and risk-feedback endpoints now require an admin-scoped
@@ -34,17 +141,9 @@ early-access list.
   allowlist and was silently allowed (#20). The extractor now scans
   `destination`, `url`, `endpoint`, and `href` and host-checks the first match
   against the allowlist.
-
-### Fixed
-
-- **Silent receipt-drop is now visible on the read API.** When a signed receipt
-  is lost (append error or retry exhaustion) the SQL audit row still exists but
-  the signed chain has a gap; `GET /v1/receipts/{run_id}` reported only the
-  receipts that were present and could show the chain as valid with no signal of
-  the divergence. The response now carries `receiptDropped` (bool) and
-  `droppedReceipts` (count) so a compliance inspector sees the gap (#23). The
-  pipeline still returns success: receipts stay advisory evidence and never fail
-  the governance decision.
+- Policy and NHI mutations are admin-gated, response-side blocks are audited, and
+  attestation replay is fixed.
+- `crossbeam-epoch` bumped to 0.9.20 for RUSTSEC-2026-0204.
 
 ---
 

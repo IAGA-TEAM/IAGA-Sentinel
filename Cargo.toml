@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.8.1"
+version = "1.9.0"
 edition = "2021"
 # Minimum Supported Rust Version. Floor set by transitive deps in Cargo.lock
 # (`home 0.5.12` needs 1.88); bump deliberately, note it in CHANGELOG.md.

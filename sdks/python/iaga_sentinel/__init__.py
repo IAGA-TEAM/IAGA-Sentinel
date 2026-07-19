@@ -14,7 +14,7 @@ from .types import (
     ReviewStatus,
 )
 
-__version__ = "1.5.2"
+__version__ = "1.9.0"
 __all__ = [
     "SentinelClient",
     "AsyncSentinelClient",

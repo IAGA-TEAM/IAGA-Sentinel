@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  Cryptographically signed, replay-verifiable, EU-sovereign evidence of the agent actions it governs, structured to support AI Act Article 12 record-keeping and Annex IV documentation.
+  Cryptographically signed, replay-verifiable evidence of every action an agent routes through it, structured to support AI Act Article 12 record-keeping and Annex IV documentation.
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.8.1-0f9d6b?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-1.9.0-0f9d6b?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/license-BUSL--1.1-0f9d6b?style=flat-square" alt="license" />
   <img src="https://img.shields.io/badge/EU%20AI%20Act-supports%20Art.%2012%20evidence-0B0F0E?style=flat-square" alt="Supports EU AI Act Article 12 record-keeping" />
   <img src="https://img.shields.io/badge/Rust-stable-0B0F0E?style=flat-square" alt="Rust" />
@@ -37,7 +37,7 @@
 
 ## What IAGA Sentinel is
 
-AI agents touch the shell, the filesystem, databases, third-party APIs, and secrets. When a regulator, an auditor, or your own DPO asks you to prove what an agent did, and to prove the record was not altered after the fact, most teams have nothing to show. IAGA Sentinel produces that proof: it sits next to your agent stack (HTTP sidecar, MCP proxy, or `iaga run`) and turns every governance verdict into an Ed25519-signed receipt linked into a hash-chained append-log, verifiable offline, with reproducible verdicts (deterministic under fixed risk weights) and replay-based drift detection. The record is structured to support EU AI Act Article 12 record-keeping and to help produce the Annex IV technical documentation a high-risk system needs by 2 August 2026.
+AI agents touch the shell, the filesystem, databases, third-party APIs, and secrets. When a regulator, an auditor, or your own DPO asks you to prove what an agent did, and to prove the record was not altered after the fact, most teams have nothing to show. IAGA Sentinel produces that proof: it sits next to your agent stack (HTTP sidecar, MCP proxy, or `iaga run`) and turns every governance verdict into an Ed25519-signed receipt linked into a hash-chained append-log, verifiable offline, with reproducible verdicts (deterministic under fixed risk weights) and replay-based drift detection. The record is structured to support EU AI Act Article 12 record-keeping and to help produce the Annex IV technical documentation a high-risk system needs.
 
 > [!IMPORTANT]
 > IAGA Sentinel governs in the loop and seals hard. Verdicts are computed before an action proceeds; with `iaga run` a blocked process never starts and an allowed one is confined directly — secrets scrubbed from its environment, no core dumps, no privilege escalation, reaped with its parent. The signed evidence and the offline replay are real and verifiable now, from a clean checkout. Kernel-level confinement (eBPF/LSM syscall and network mediation) is the Enterprise tier and is not in this open build: `iaga kernel status` reports the posture honestly, and every receipt carries `is_authoritative: false`. We do not market enforcement we do not provide.
@@ -51,7 +51,7 @@ What makes it different:
 
 - **Proof, not testimony.** Ed25519 + hash-chained receipts, verifiable offline with the standalone `iaga-verify` binary: no server, no network, no trust in IAGA required.
 - **Honest posture.** The enforcement posture is recorded inside the signed evidence itself (`is_authoritative: false`), not buried in a footnote.
-- **Sovereign by construction.** Runs fully self-hosted or air-gapped; BUSL-1.1 auto-converts to Apache-2.0; the evidence stays in your hands and need never be handed to a third-party cloud provider.
+- **Self-hosted, no vendor in the loop.** Runs fully self-hosted or air-gapped; BUSL-1.1 auto-converts to Apache-2.0; no IAGA-operated service holds a copy of your evidence.
 - **EU AI Act-shaped.** Receipts line up with Article 12 logging; typed Dictum policies document your risk controls.
 
 ---
@@ -80,7 +80,7 @@ curl -s -X POST http://localhost:4010/v1/inspect -H 'Content-Type: application/j
 The receipt chain verifies with no server, no database and no network, using the standalone `iaga-verify` binary. That binary isn't in the Docker image, so install the CLI (still no clone) and run the same flow locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.8.1 --locked \
+cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.0 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo     # then POST /v1/inspect as above
 ```
@@ -95,9 +95,9 @@ Postgres (`--features postgres` + `DATABASE_URL`) and `docker compose up -d` are
 
 ---
 
-## Test me now (1.8.1)
+## Test me now (1.9.0)
 
-Do not take our word for it. The repository ships a self-contained demo kit that drives three real verdicts through the live pipeline and proves the receipt offline, on your own machine. Nothing is faked, and you get the same verdicts every run. Two scripts under [`scripts/`](scripts/) and a runbook in [`docs/demo/README.md`](docs/demo/README.md). The primary path is Windows PowerShell; Linux and macOS use the `.sh` twins.
+Do not take our word for it. The repository ships a self-contained demo kit that drives three real verdicts through the live pipeline and proves the receipt offline, on your own machine. Nothing is faked, and you get the same verdicts every run (the verdicts are stable; the exact risk integers drift slightly with agent trust, which the pipeline updates after each action). Two scripts under [`scripts/`](scripts/) and a runbook in [`docs/demo/README.md`](docs/demo/README.md). The primary path is Windows PowerShell; Linux and macOS use the `.sh` twins.
 
 Open two terminals. **Terminal A** starts the server: it builds the binaries, wipes the demo database for an identical seed, and serves the dashboard on `:4010`.
 
@@ -117,8 +117,8 @@ cd path\to\IAGA-Sentinel
 Paced for the camera, you will watch three real verdicts land in the dashboard Live feed and the terminal at the same time:
 
 - **Beat 1, ALLOW** (risk 2): a safe repository read, recorded.
-- **Beat 2, REVIEW** (risk 41): a shell command that needs a production secret, held for a human.
-- **Beat 3, BLOCK** (risk 81): `rm -rf` on the database, stopped before it runs.
+- **Beat 2, REVIEW** (risk 40): a shell command that needs a production secret, opened as a pending review request for a human.
+- **Beat 3, BLOCK** (risk 81): `rm -rf` on the database, denied with a signed receipt that proves it (`/v1/inspect` returns the verdict; `iaga run` blocks a launch outright).
 - **The proof.** The three signed receipts export as one hash-chained run and `iaga-verify` prints `CHAIN OK` with no server, no database and no network. The final receipt attests the Block.
 
 <p align="center">
@@ -166,7 +166,7 @@ Today, IAGA Sentinel is a source-available project (BUSL-1.1) and research effor
 
 ## Who we are
 
-EU-sovereign infrastructure for an EU regulation is a question of who builds it. IAGA Sentinel is built in the EU by a founding team that is European, multilingual, and native to the regulated sectors the AI Act governs. The same "sovereign by construction" thread that runs through the evidence also runs through the team. The claims below are stated as facts, with links to check them: the same posture every receipt carries.
+Infrastructure for an EU regulation is a question of who builds it. IAGA Sentinel is built in the EU by a founding team that is European, multilingual, and native to the regulated sectors the AI Act governs. The claims below are stated as facts, with links to check them: the same posture every receipt carries.
 
 - **William Petteni** (CEO, 20, French). Commercial and strategy. Pursuing a dual degree in mechanical engineering and computer science, with deep networks across EU regulated sectors.
 - **Justus Moritz Bohr** (CPO, 19, German). Product and business. Third-time founder, 4+ years in business development; leads product for Annex IV and the regulatory UX.
@@ -192,6 +192,9 @@ Research-validated, not marketing-validated.
 ## Status
 
 > [!NOTE]
+> **New in 1.9.0: evidence integrity you can demand, and deploy paths that hold.** Receipts can now be **fail-closed** (`IAGA_SENTINEL_RECEIPT_FAIL_CLOSED`): with it set, no verdict ships without its signed receipt, and a server that cannot build a receipt logger refuses to start. Off by default, so the default build and receipt bytes are unchanged from 1.8.1. `workspaceId` is no longer trusted from the request body — the governance scope is derived from the agent profile, and a request asserting a different workspace gets `403 scope_mismatch` instead of being judged by another workspace's policy. On the deployment side, Compose and the Kubernetes manifest now persist the Ed25519 signing key (it was regenerated on every restart, breaking verification of earlier receipts), the Helm chart no longer mounts an empty policy over the image's, and `IAGA_SENTINEL_BOOTSTRAP_API_KEY` makes a fresh install reachable without an interactive `iaga gen-key`. See the [CHANGELOG](CHANGELOG.md).
+
+> [!NOTE]
 > **New in 1.8.0: stronger userspace confinement + reverse-shell detection.** `iaga run` now confines an allowed child directly — `setsid`, no core dumps (`RLIMIT_CORE=0`), no privilege escalation (`PR_SET_NO_NEW_PRIVS` on Linux), reaped with its parent — and the threat-intel layer flags reverse shells (netcat `-e`/`-c`, `bash`/`/dev/tcp`, `socat EXEC`) and recursive `chmod 777` as critical. Enforcement stays **cooperative / userspace**: kernel eBPF/LSM confinement remains Enterprise, `iaga kernel status` reports the posture honestly, and every receipt still carries `is_authoritative: false`. The default build and receipt bytes are unchanged from 1.7.2. See the [CHANGELOG](CHANGELOG.md).
 
 > [!NOTE]
@@ -209,7 +212,7 @@ Research-validated, not marketing-validated.
 > [!NOTE]
 > **New in 1.5.4: the policy language now enforces what it promised.** The Dictum `secret_ref()` builtin actually detects credentials and PII inside a tool payload (it was a placeholder that always returned false), and a new `url_host()` builtin gives a policy a real per-host egress allowlist that also defeats look-alike-domain bypasses. Three core fixes ship alongside: the workspace egress allowlist is URL-aware, so a full URL to an allowed host is no longer over-blocked; every `block` or `review` now carries its cause in the audit event and the signed receipt, with no silent escalation; and signed receipts hash-chain across a session, so a multi-step run forms one tamper-evident hash chain. See [ADR 0023](docs/adr/0023-dictum-secret-detection-host-egress.md) and the [CHANGELOG](CHANGELOG.md).
 
-Current release: **1.8.0** ([release notes](CHANGELOG.md)). CI runs the full workspace test suite (default and `--all-features`), live-Postgres receipt tests, SDK end-to-end smokes against a real sidecar, and clippy with `-D warnings`. All green from a clean checkout.
+Current release: **1.9.0** ([release notes](CHANGELOG.md)). CI runs the full workspace test suite (default and `--all-features`), live-Postgres receipt tests, SDK end-to-end smokes against a real sidecar, and clippy with `-D warnings`. All green from a clean checkout.
 
 ---
 

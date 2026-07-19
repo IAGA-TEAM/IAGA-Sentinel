@@ -89,7 +89,7 @@ appear in the dashboard Live feed.
 | 40-58 | **Beat 3** banner, BLOCK (red); red row in Live feed | "`rm -rf` on the database. Sentinel returns a block verdict and signs the receipt that proves it." |
 | 58-62 | Cut to the terminal; optionally click the **Evidence** tab | "Three verdicts. Now the proof." |
 | 62-85 | `iaga replay --export`, then `iaga-verify` (embedded), then `--key` (pinned, clean) | "Export the signed chain. Verify it offline - no server, no database, just this file and a public key. CHAIN OK. The final receipt attests the Block." |
-| 85-95 | Final green **CHAIN OK** banner | "Deterministic. Tamper-evident. EU-sovereign cryptographic evidence." |
+| 85-95 | Final green **CHAIN OK** banner | "Deterministic. Tamper-evident. Cryptographic evidence." |
 
 ### What to point at in the dashboard
 
