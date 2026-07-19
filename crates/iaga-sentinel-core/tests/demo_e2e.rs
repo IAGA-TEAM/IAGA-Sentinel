@@ -7,7 +7,9 @@
 //! ships (`iaga_sentinel_verify::verify_export`) — so the demo's "CHAIN OK" is
 //! test-backed. An adversarial exfiltration case the video tells is added as a
 //! fixture and asserted not-allowed, without touching the canonical four
-//! scenarios (so their on-camera risk numbers stay put).
+//! scenarios. Note this pins the demo's *verdicts*, not its risk integers:
+//! those move with agent trust, which the pipeline updates after every action,
+//! so no test pins them and the README quotes a clean first run.
 
 #![cfg(all(feature = "receipts", feature = "sqlite"))]
 

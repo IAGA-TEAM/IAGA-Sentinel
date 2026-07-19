@@ -91,6 +91,9 @@ const SENSITIVE_ENV_DENYLIST: &[&str] = &[
     "DATABASE_URL",
     // The receipt signing key path must never leak to a governed child.
     "IAGA_SENTINEL_SIGNER_KEY_PATH",
+    // Nor must the bootstrap admin credential: a governed child holding it
+    // could delete API keys and drain the audit surface it is being judged by.
+    "IAGA_SENTINEL_BOOTSTRAP_API_KEY",
 ];
 
 /// TOML schema for the optional denylist extension file.
@@ -466,8 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn builtin_denylist_has_23_entries() {
-        assert_eq!(SENSITIVE_ENV_DENYLIST.len(), 23);
+    fn builtin_denylist_has_24_entries() {
+        assert_eq!(SENSITIVE_ENV_DENYLIST.len(), 24);
     }
 
     #[test]

@@ -86,19 +86,39 @@ pub async fn execute_pipeline_at(
         .policy_store
         .get_agent_profile(&input.agent_id)
         .await?;
-    let workspace_id = input
-        .workspace_id
-        .as_deref()
-        .unwrap_or(&profile.workspace_id);
+    // SCOPE-DERIVE-1: the governance scope is derived from the agent profile,
+    // never from the request body. Until 1.9 a client-supplied `workspaceId`
+    // took precedence over the profile, so an authenticated caller could have
+    // its action evaluated against another workspace's thresholds, egress
+    // allowlist and tool policy — and get a receipt signed with that
+    // workspace's `policy_hash`. The field is still accepted, but only as an
+    // assertion that must agree with the server's view.
+    //
+    // Empty string is treated as absent: the Python SDK serializes "no opinion"
+    // that way (sdks/python/iaga_sentinel/types.py).
+    if let Some(claimed) = input.workspace_id.as_deref().filter(|s| !s.is_empty()) {
+        if claimed != profile.workspace_id {
+            return Err(SentinelError::WorkspaceScopeMismatch {
+                agent_id: input.agent_id.clone(),
+                expected: profile.workspace_id.clone(),
+                claimed: claimed.to_string(),
+            });
+        }
+    }
+    let workspace_id = profile.workspace_id.as_str();
     let workspace_policy = state
         .policy_store
         .get_workspace_policy(workspace_id)
         .await?;
-    let tenant_id = input
+    // `tenantId` from the request is ignored, not rejected: it feeds the audit
+    // event, so honouring a client value would let a caller mislabel its own
+    // evidence, but the field was documented as a request-level input and a
+    // hard 403 would break callers with no deprecation window. Ignoring closes
+    // the hole just as completely — an ignored value never reaches the row.
+    let tenant_id = profile
         .tenant_id
         .clone()
-        .or(profile.tenant_id.clone())
-        .or(workspace_policy.tenant_id.clone());
+        .or_else(|| workspace_policy.tenant_id.clone());
 
     // CRYPTO-POLICYHASH-7a: digest the real resolved workspace policy so every
     // receipt binds the YAML that decided the verdict (was a constant
@@ -206,7 +226,7 @@ pub async fn execute_pipeline_at(
                     dictum_trace: None,
                 },
             )
-            .await;
+            .await?;
         }
 
         return Ok(GovernanceResult {
@@ -997,7 +1017,7 @@ pub async fn execute_pipeline_at(
                 dictum_trace: dictum_trace.as_ref(),
             },
         )
-        .await;
+        .await?;
     }
 
     // Create review request if needed

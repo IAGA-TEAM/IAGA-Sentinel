@@ -804,6 +804,10 @@ async fn cmd_serve(
     // Auto-import iaga-sentinel.yaml if it exists and DB is fresh
     auto_import_config(&storage.policy_store).await;
 
+    // Make the first boot usable: without this a fresh DB with open mode off
+    // answers 401 on every route until someone runs `iaga gen-key` by hand.
+    bootstrap_api_key_from_env(&storage.api_key_store).await;
+
     let event_bus = EventBus::new(1024);
     let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
         webhooks::DeadLetterQueue::new(),
@@ -1000,6 +1004,7 @@ async fn cmd_serve(
     let policy_hash_override: Option<String> = None;
 
     let receipts = try_build_receipt_logger(db_url, policy_hash_override).await;
+    require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
 
     let state = Arc::new(AppState {
@@ -2069,6 +2074,80 @@ fn build_threat_feed() -> Arc<ThreatFeed> {
     Arc::new(feed)
 }
 
+/// Register an operator-supplied admin key from `IAGA_SENTINEL_BOOTSTRAP_API_KEY`.
+///
+/// Without this, a fresh database plus `openMode: false` — which is what every
+/// deployment artifact in this repo configures — leaves every route answering
+/// 401 until someone execs into the container and runs `iaga gen-key`, and the
+/// generated key is unknowable to clients configured ahead of time.
+///
+/// Idempotent: if the key already verifies, nothing is written. Concurrent
+/// replicas racing on a shared Postgres each insert their own row (the UNIQUE
+/// index is on `key_hash`, and Argon2 salts per call, so identical keys never
+/// collide). That is benign — every row grants the same key the same scope.
+async fn bootstrap_api_key_from_env(store: &Arc<dyn iaga_sentinel::storage::traits::ApiKeyStore>) {
+    use iaga_sentinel::auth::api_keys::{hash_key, validate_bootstrap_key, BOOTSTRAP_ENV};
+    use iaga_sentinel::storage::traits::KeyScope;
+
+    let raw = match std::env::var(BOOTSTRAP_ENV) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    if let Err(why) = validate_bootstrap_key(&raw) {
+        // Fail loudly: the operator asked for authentication and would
+        // otherwise get a server that silently ignored the request.
+        eprintln!("{BOOTSTRAP_ENV} is set but invalid: {why}.");
+        process::exit(2);
+    }
+
+    match store.verify_raw_key_scoped(&raw).await {
+        Ok(Some(_)) => {
+            tracing::info!("bootstrap API key already registered; nothing to do");
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("Failed to check the existing API keys for {BOOTSTRAP_ENV}: {e}");
+            process::exit(2);
+        }
+    }
+
+    let key_id = uuid::Uuid::new_v4().to_string();
+    let key_hash = hash_key(&raw);
+    match store
+        .store_key_scoped(&key_id, &key_hash, "bootstrap", &raw, KeyScope::Admin)
+        .await
+    {
+        // The key itself is never logged: it is a live admin credential.
+        Ok(()) => tracing::info!(key_id = %key_id, "registered admin API key from {BOOTSTRAP_ENV}"),
+        Err(e) => {
+            eprintln!("Failed to register the API key from {BOOTSTRAP_ENV}: {e}");
+            process::exit(2);
+        }
+    }
+}
+
+/// Refuse to serve when the operator asked for fail-closed receipts but no
+/// receipt logger could be built (no signer key, store open failure, or the
+/// `receipts` feature compiled out). Serving anyway would make the *worst*
+/// misconfiguration the *most* permissive one: with no logger every action is
+/// allowed unevidenced, while a merely broken logger blocks. Called from the
+/// long-running surfaces only — `serve`, `proxy`, `mcp-server`, `run` — not
+/// from the one-shot developer commands.
+fn require_receipts_or_exit(
+    receipts: &Option<Arc<dyn iaga_sentinel::pipeline::receipts::ReceiptLogger>>,
+) {
+    if receipts.is_none() && iaga_sentinel::pipeline::receipts::fail_closed_enabled() {
+        eprintln!(
+            "IAGA_SENTINEL_RECEIPT_FAIL_CLOSED is set but no receipt logger could be built.\n\
+             Refusing to start: every verdict would be returned with no signed evidence behind it.\n\
+             Check the signer key path and the receipt store, or unset the variable."
+        );
+        process::exit(2);
+    }
+}
+
 async fn seed_demo_data(policy_store: &Arc<dyn PolicyStore>) {
     use iaga_sentinel::demo::scenarios::{demo_profiles, demo_workspace_policies};
 
@@ -2106,6 +2185,7 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
     )));
 
     let receipts = try_build_receipt_logger(db_url, None).await;
+    require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
     #[cfg(feature = "dictum")]
     let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> = None;
@@ -2167,6 +2247,7 @@ async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
     )));
 
     let receipts = try_build_receipt_logger(db_url, None).await;
+    require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
     #[cfg(feature = "dictum")]
     let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> = None;
@@ -2292,9 +2373,18 @@ async fn auto_import_config(policy_store: &Arc<dyn PolicyStore>) {
     ] {
         if std::path::Path::new(name).exists() {
             tracing::info!(file = name, "Found config file, auto-importing...");
+            // A config file that is PRESENT but unusable is an operator error,
+            // not an absence: warning and carrying on starts a server with zero
+            // profiles and zero workspaces that looks configured and governs
+            // nothing. The Helm chart shipped exactly that (an empty default
+            // mounted over the image's policy), so this is fatal from 1.9.
+            // A missing file stays non-fatal — that is a legitimate setup.
             let raw = match std::fs::read_to_string(name) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("Cannot read config file {name}: {e}");
+                    process::exit(2);
+                }
             };
 
             let config: iaga_sentinel::core::types::SentinelConfig =
@@ -2302,16 +2392,24 @@ async fn auto_import_config(policy_store: &Arc<dyn PolicyStore>) {
                     match serde_yaml::from_str(&raw) {
                         Ok(c) => c,
                         Err(e) => {
-                            tracing::warn!(error = %e, "Failed to parse config file");
-                            continue;
+                            eprintln!(
+                                "Config file {name} is present but could not be parsed: {e}\n\
+                                 It must define `profiles` and `workspaces`. Refusing to start \
+                                 with no policy loaded."
+                            );
+                            process::exit(2);
                         }
                     }
                 } else {
                     match serde_json::from_str(&raw) {
                         Ok(c) => c,
                         Err(e) => {
-                            tracing::warn!(error = %e, "Failed to parse config file");
-                            continue;
+                            eprintln!(
+                                "Config file {name} is present but could not be parsed: {e}\n\
+                                 It must define `profiles` and `workspaces`. Refusing to start \
+                                 with no policy loaded."
+                            );
+                            process::exit(2);
                         }
                     }
                 };
@@ -2503,6 +2601,7 @@ async fn cmd_kernel_run(db_url: &str, agent_id: &str, cwd: Option<&str>, cmd: &[
     // `iaga migrate` + import step.
     seed_demo_data(&storage.policy_store).await;
     let receipts = try_build_receipt_logger(db_url, None).await;
+    require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
     #[cfg(feature = "dictum")]
     let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> = None;

@@ -25,6 +25,19 @@ pub enum SentinelError {
     #[error("This endpoint requires an admin-scoped API key")]
     AdminScopeRequired,
 
+    /// The request asserted a workspace that is not the one its agent profile
+    /// belongs to. Scope is derived server-side from the profile; a contradicting
+    /// client value is refused rather than silently honoured, which would have
+    /// evaluated the action against another workspace's thresholds, egress
+    /// allowlist and tool policy, and signed the receipt with that workspace's
+    /// `policy_hash`.
+    #[error("Agent '{agent_id}' belongs to workspace '{expected}', but the request asserted '{claimed}'")]
+    WorkspaceScopeMismatch {
+        agent_id: String,
+        expected: String,
+        claimed: String,
+    },
+
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
@@ -60,6 +73,9 @@ impl IntoResponse for SentinelError {
             SentinelError::AuthRequired => (StatusCode::UNAUTHORIZED, "auth_required"),
             SentinelError::InvalidApiKey => (StatusCode::UNAUTHORIZED, "invalid_api_key"),
             SentinelError::AdminScopeRequired => (StatusCode::FORBIDDEN, "admin_scope_required"),
+            SentinelError::WorkspaceScopeMismatch { .. } => {
+                (StatusCode::FORBIDDEN, "scope_mismatch")
+            }
             SentinelError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             SentinelError::ReviewNotFound(_) => (StatusCode::NOT_FOUND, "review_not_found"),
             SentinelError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),

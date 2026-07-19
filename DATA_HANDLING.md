@@ -160,7 +160,7 @@ not this open build.
 
 When `iaga run` launches a child process, the child gets a scoped environment: an allowlist
 of inherited variables plus the entries passed explicitly in the launch spec. On top of
-that, a denylist of 23 known secret-bearing variables (cloud and model-provider
+that, a denylist of 24 known secret-bearing variables (cloud and model-provider
 credentials, registry tokens, and the receipt signing-key path) is stripped from the final
 environment, even when passed explicitly, so a governed agent does not receive host secrets
 through its process environment. The denylist is extendable at runtime with a TOML file at
@@ -212,10 +212,12 @@ just early information.
 | `IAGA_SENTINEL_RECEIPT_CAPTURE` | off | When `1`/`true`/`yes`, stores raw request snapshots, policy traces, and tokenized-input digests in receipts. |
 | `DATABASE_URL` | `sqlite:iaga_sentinel.db?mode=rwc` | Where all state is stored. `postgres://` requires the `postgres` feature. |
 | `IAGA_SENTINEL_SIGNER_KEY_PATH` | `~/.iaga-sentinel/keys/receipt_signer.ed25519` | Path to the Ed25519 receipt signing key. Auto-generated on first use if absent. |
-| `IAGA_SENTINEL_ENV_DENYLIST` | unset | Path to a TOML file (`deny = [...]`) that extends the 23-variable sensitive-env denylist scrubbed from governed child processes (1.3.1). |
+| `IAGA_SENTINEL_ENV_DENYLIST` | unset | Path to a TOML file (`deny = [...]`) that extends the 24-variable sensitive-env denylist scrubbed from governed child processes (1.3.1). |
 | `IAGA_SENTINEL_NHI_MASTER_SEED` | random per process | Seed for non-human-identity derivation. Set it for stable identities across restarts. |
 | `IAGA_SENTINEL_REASONING_MODELS` | unset | Local ONNX model paths for the `ml` feature. Models are read from local disk only. |
 | `IAGA_SENTINEL_PLUGIN_DIR` | `./plugins` | Local directory WASM plugins are loaded from. |
 | `IAGA_SENTINEL_OPEN_MODE` | off | When `true` and no API keys exist, disables auth on protected routes. Use only in trusted environments. |
+| `IAGA_SENTINEL_BOOTSTRAP_API_KEY` | unset | An admin API key registered at startup so a fresh deployment is reachable without an interactive `iaga gen-key`. Idempotent; the value is never logged. Distinct from the client-side `IAGA_SENTINEL_API_KEY` used by the plug-ins. |
+| `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED` | off | When `1`/`true`/`yes`, a receipt that cannot be signed and persisted makes the governance call fail instead of returning a verdict. Off by default: receipts are advisory evidence and never fail the decision. |
 
 See also [`SECURITY.md`](SECURITY.md) for vulnerability reporting and the signing posture.

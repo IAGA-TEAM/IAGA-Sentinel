@@ -63,7 +63,7 @@ build.
 
 When `iaga run` launches a child process under the kernel, the child receives a scoped
 environment: an allowlist of inherited variables plus the entries the caller passes
-explicitly. On top of that, IAGA Sentinel scrubs a denylist of 23 known secret-bearing
+explicitly. On top of that, IAGA Sentinel scrubs a denylist of 24 known secret-bearing
 variables (cloud and model-provider credentials such as `AWS_SECRET_ACCESS_KEY` and
 `OPENAI_API_KEY`, registry tokens, and the receipt signing-key path
 `IAGA_SENTINEL_SIGNER_KEY_PATH`) from the final child environment, even when passed

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IAGA Sentinel API
-  version: 1.5.2
+  version: 1.9.0
   description: >
     IAGA Sentinel is the EU AI Act conformity evidence layer for AI agents.
     It intercepts tool calls, evaluates risk against typed policies, and
@@ -1824,7 +1824,9 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Forbidden:
-      description: Policy violation
+      description: >-
+        Policy violation, or a scope the caller is not entitled to assert
+        (`scope_mismatch`).
       content:
         application/json:
           schema:
@@ -1867,6 +1869,7 @@ components:
             - auth_required
             - invalid_api_key
             - admin_scope_required
+            - scope_mismatch
             - invalid_request
             - review_not_found
             - internal_error
@@ -1892,7 +1895,7 @@ components:
           example: gateway
         version:
           type: string
-          example: 1.5.2
+          example: 1.9.0
         authRequired:
           type: boolean
           description: True unless open mode is on and no keys exist
@@ -1957,10 +1960,19 @@ components:
           description: Unique agent identifier
         tenantId:
           type: string
-          description: Optional tenant scope
+          description: >-
+            Ignored. The tenant is derived server-side from the agent profile,
+            falling back to the workspace policy. Accepted for wire
+            compatibility; any supplied value is discarded and never reaches the
+            audit event.
         workspaceId:
           type: string
-          description: Optional workspace scope
+          description: >-
+            Optional assertion of the agent's workspace. The workspace is
+            derived server-side from the agent profile; if this field is present
+            and non-empty it must match, otherwise the request is rejected with
+            403 `scope_mismatch`. Omit it unless you want the server to check
+            your assumption.
         framework:
           type: string
           description: Agent framework name (e.g. langchain, autogen)

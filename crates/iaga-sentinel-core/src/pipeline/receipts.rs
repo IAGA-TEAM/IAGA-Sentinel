@@ -5,8 +5,11 @@
 //! - In addition, if a `ReceiptLogger` is configured on `AppState`, every
 //!   stored verdict is translated into a signed `Receipt` appended to the
 //!   Merkle chain of the corresponding `run_id` (mapped from `trace_id` /
-//!   `event_id`). A failure in the receipt path must never fail the
-//!   governance decision, errors are logged at warn level and swallowed.
+//!   `event_id`). A failure in the receipt path does not fail the governance
+//!   decision: errors are logged, counted, and the drop is surfaced on the
+//!   read API. Operators who need the opposite trade (no verdict without
+//!   evidence) opt in with `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED`, which is off
+//!   by default — see `fail_closed_enabled`.
 //! - The trait is defined here so callers can remain feature-agnostic:
 //!   `state.receipts: Option<Arc<dyn ReceiptLogger>>` is `None` when the
 //!   `receipts` cargo feature is disabled and the concrete impl is absent.
@@ -51,9 +54,20 @@ pub struct ReceiptContext<'a> {
 
 #[async_trait]
 pub trait ReceiptLogger: Send + Sync {
-    /// Append a signed receipt for the given audit event. Must not panic
-    /// and must not propagate errors into the hot path: implementations
-    /// log internally and return. The optional `evidence` carries ML
+    /// Append a signed receipt for the given audit event. Must not panic.
+    ///
+    /// **Fail-open is the default and the historical contract.** A receipt
+    /// that cannot be signed or persisted is logged at error level, counted
+    /// on `iaga_sentinel.receipts.dropped`, recorded in the per-run drop
+    /// registry (surfaced as `receiptDropped` on `GET /v1/receipts/{run_id}`)
+    /// and swallowed — this returns `Ok(())`. Receipts are advisory evidence
+    /// and a receipt failure does not fail the governance decision.
+    ///
+    /// An error is returned **only** when the operator opted into fail-closed
+    /// mode (`IAGA_SENTINEL_RECEIPT_FAIL_CLOSED`). Callers propagate it with
+    /// `?`; in the default configuration that `?` is unreachable.
+    ///
+    /// The optional `evidence` carries ML
     /// scores and model digests from the reasoning plane (M3.5); when
     /// `None`, the receipt body records empty `model_digests` and
     /// `ml_scores: None` (legacy M2 behavior).
@@ -68,7 +82,7 @@ pub trait ReceiptLogger: Send + Sync {
         evidence: Option<&ReasoningOutcome>,
         usage: Option<&iaga_sentinel_cost::UsageData>,
         ctx: ReceiptContext<'_>,
-    );
+    ) -> Result<(), crate::core::errors::SentinelError>;
 
     /// 1.0 read surface for the dashboard / HTTP API. Implementations
     /// return JSON-shaped data; defaults return empty so non-receipt
@@ -89,6 +103,35 @@ pub trait ReceiptLogger: Send + Sync {
     fn policy_hash(&self) -> Option<String> {
         None
     }
+}
+
+/// 1.9 opt-in: when `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED` is set, a receipt that
+/// cannot be signed and persisted makes the governance call fail instead of
+/// returning a verdict with no evidence behind it. **Off by default** — the
+/// default trade stays "advisory evidence never fails the decision".
+///
+/// Read once at logger construction, not per call: the mode is an operator
+/// boot decision and must not change under a live process.
+///
+/// What fail-closed does **not** promise, stated plainly because the honest
+/// posture is the point:
+/// - The SQL audit row is appended *before* the receipt, so a crash between
+///   the two still leaves an audit event with no receipt. Fail-closed narrows
+///   the window to a crash; it does not make the pair atomic. A transactional
+///   outbox would, and is not in this build.
+/// - A verdict whose receipt was lost never reaches the caller, so it also
+///   emits no SSE event and fires no webhook: real-time alerting goes quiet
+///   for exactly that action. The audit row and the drop counter still record it.
+/// - `iaga.response_scan` over the MCP transport records no receipt in *either*
+///   mode (it never calls this logger), so fail-closed cannot cover it. Known
+///   gap, not a guarantee with an asterisk.
+pub fn fail_closed_enabled() -> bool {
+    std::env::var("IAGA_SENTINEL_RECEIPT_FAIL_CLOSED")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
 }
 
 /// Best-effort construction of a signed receipt logger. Returns `None` when:
@@ -162,6 +205,12 @@ mod signed {
         /// only in the `error!` log and the `receipts.dropped` counter. In-memory
         /// (process lifetime); the durable operator signals stay the log + metric.
         dropped_runs: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+        /// 1.9 opt-in fail-closed mode. Resolved ONCE in `try_build` from
+        /// `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED` rather than per call: the mode is
+        /// an operator boot decision, it must not change mid-process, and the
+        /// hot path does no env lookup. `new()` defaults it to `false`, which is
+        /// the project default and keeps every existing caller unchanged.
+        fail_closed: bool,
     }
 
     impl SignedReceiptLogger {
@@ -176,7 +225,15 @@ mod signed {
                 policy_hash,
                 append_guard: Mutex::new(()),
                 dropped_runs: std::sync::Mutex::new(std::collections::HashMap::new()),
+                fail_closed: false,
             }
+        }
+
+        /// Opt into fail-closed receipts for this logger. Off by default;
+        /// `try_build` sets it from `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED`.
+        pub fn with_fail_closed(mut self, on: bool) -> Self {
+            self.fail_closed = on;
+            self
         }
 
         fn input_hash(event: &StoredAuditEvent) -> String {
@@ -236,7 +293,7 @@ mod signed {
             evidence: Option<&super::ReasoningOutcome>,
             usage: Option<&iaga_sentinel_cost::UsageData>,
             ctx: super::ReceiptContext<'_>,
-        ) {
+        ) -> Result<(), crate::core::errors::SentinelError> {
             let run_id = Self::run_id(event);
             let input_hash = Self::input_hash(event);
             // CRYPTO-POLICYHASH-7a: when the host has no Dictum overlay, the
@@ -382,7 +439,7 @@ mod signed {
                 match self.store.append(&receipt).await {
                     Ok(()) => {
                         emit_receipt_metric("iaga_sentinel.receipts.signed");
-                        return;
+                        return Ok(());
                     }
                     Err(ReceiptError::DuplicateSeq { .. })
                     | Err(ReceiptError::ChainViolation { .. }) => {
@@ -392,6 +449,16 @@ mod signed {
                             attempt,
                             "receipt append lost the head race; retrying"
                         );
+                        // `append_guard` only serializes writers inside THIS
+                        // process, so on a shared Postgres two replicas can
+                        // collide on the same run_id. Back off between retries
+                        // so a burst does not burn all five attempts in a few
+                        // microseconds — under fail-closed that would surface as
+                        // a 500 the caller can induce by picking a sessionId.
+                        // ponytail: fixed exponential step, no jitter, no `rand`
+                        // dependency. Good enough to break a two-writer tie.
+                        tokio::time::sleep(std::time::Duration::from_millis(5 << attempt.min(5)))
+                            .await;
                         continue;
                     }
                     Err(e) => {
@@ -403,15 +470,27 @@ mod signed {
 
             error!(
                 run_id = %run_id,
+                fail_closed = self.fail_closed,
                 "receipt dropped (append error or retries exhausted); audit trail and signed chain may diverge"
             );
             // issue #23: record the divergence per run so the read API can surface
             // it. A compliance inspector comparing audit-event count to chain
             // length would otherwise see an unexplained gap in the signed material.
+            // Recorded in BOTH modes: the read surface reports the gap either way.
             if let Ok(mut dropped) = self.dropped_runs.lock() {
                 *dropped.entry(run_id.clone()).or_insert(0) += 1;
             }
             emit_receipt_metric("iaga_sentinel.receipts.dropped");
+
+            // 1.9 opt-in. `false` (the default) reproduces 1.8.1 exactly.
+            if self.fail_closed {
+                return Err(crate::core::errors::SentinelError::Storage(format!(
+                    "receipt could not be signed and persisted for run {run_id}; \
+                     refusing to return a verdict with no evidence behind it \
+                     (IAGA_SENTINEL_RECEIPT_FAIL_CLOSED is on)"
+                )));
+            }
+            Ok(())
         }
 
         async fn list_runs_json(&self, limit: u32) -> serde_json::Value {
@@ -579,13 +658,16 @@ mod signed {
         };
 
         let resolved_policy_hash = policy_hash.unwrap_or_else(default_policy_hash);
+        let fail_closed = super::fail_closed_enabled();
         tracing::info!(
             key_id = signer.key_id(),
             path = %key_path.display(),
             policy_hash = %resolved_policy_hash,
+            fail_closed,
             "receipts: signed action receipts enabled"
         );
-        let logger = SignedReceiptLogger::new(store, signer, resolved_policy_hash);
+        let logger = SignedReceiptLogger::new(store, signer, resolved_policy_hash)
+            .with_fail_closed(fail_closed);
         Some(Arc::new(logger) as Arc<dyn super::ReceiptLogger>)
     }
 
@@ -671,9 +753,15 @@ mod signed {
                 "policy-test".to_string(),
             );
             // Session-less event -> run_id == event_id ("evt-123").
-            logger
+            // Default (fail-open): the drop is recorded but does NOT surface as
+            // an error — receipts stay advisory evidence.
+            let outcome = logger
                 .record(&event(None), None, None, ReceiptContext::default())
                 .await;
+            assert!(
+                outcome.is_ok(),
+                "default mode must never fail the governance decision on a receipt drop"
+            );
 
             let run = logger.get_run_json("evt-123").await;
             assert_eq!(
@@ -687,6 +775,31 @@ mod signed {
             let clean = logger.get_run_json("some-other-run").await;
             assert_eq!(clean["receiptDropped"], serde_json::json!(false));
             assert_eq!(clean["droppedReceipts"], serde_json::json!(0));
+        }
+
+        #[tokio::test]
+        async fn fail_closed_turns_a_dropped_receipt_into_an_error() {
+            // 1.9 opt-in: with fail-closed on, the same drop that is swallowed
+            // above must reach the caller, so `/v1/inspect` returns an error
+            // instead of a verdict with no signed evidence behind it.
+            let logger = SignedReceiptLogger::new(
+                Arc::new(FailingStore) as Arc<dyn ReceiptStore>,
+                Arc::new(LocalDiskSigner::generate()) as Arc<dyn Signer>,
+                "policy-test".to_string(),
+            )
+            .with_fail_closed(true);
+
+            let outcome = logger
+                .record(&event(None), None, None, ReceiptContext::default())
+                .await;
+            assert!(
+                outcome.is_err(),
+                "fail-closed must not return a verdict whose receipt was lost"
+            );
+
+            // The read surface still reports the gap in this mode.
+            let run = logger.get_run_json("evt-123").await;
+            assert_eq!(run["receiptDropped"], serde_json::json!(true));
         }
     }
 }

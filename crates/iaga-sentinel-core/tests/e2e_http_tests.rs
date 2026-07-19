@@ -916,6 +916,26 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
         .expect("agent inspect should complete");
     assert_eq!(inspect.status(), StatusCode::OK);
 
+    // SCOPE-DERIVE-1: but it cannot pick which workspace policy judges it. A
+    // valid key naming a workspace its agent does not belong to is refused,
+    // instead of having the action scored against that workspace's thresholds
+    // and egress allowlist and signed with its policy_hash.
+    let mut forged = safe_inspect_body();
+    forged["workspaceId"] = serde_json::json!("ws-cli");
+    let forged_resp = agent
+        .post(format!("{}/v1/inspect", server.base_url()))
+        .json(&forged)
+        .send()
+        .await
+        .expect("forged-scope inspect should complete");
+    assert_eq!(
+        forged_resp.status(),
+        StatusCode::FORBIDDEN,
+        "an agent must not evaluate its action against another workspace's policy"
+    );
+    let forged_body: Value = forged_resp.json().await.expect("forged scope JSON");
+    assert_eq!(forged_body["error"], "scope_mismatch");
+
     // The admin key still manages keys, and records expose their scope.
     let keys = admin
         .get(format!("{}/v1/auth/keys", server.base_url()))

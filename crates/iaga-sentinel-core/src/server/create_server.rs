@@ -953,7 +953,7 @@ async fn telemetry_export_handler() -> Json<Vec<serde_json::Value>> {
 async fn response_scan_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ResponseScanRequest>,
-) -> Json<ResponseScanResult> {
+) -> Result<Json<ResponseScanResult>, SentinelError> {
     let result = scan_response(&payload);
 
     tracing::info!(
@@ -1007,11 +1007,11 @@ async fn response_scan_handler(
                     dictum_trace: None,
                 },
             )
-            .await;
+            .await?;
         }
     }
 
-    Json(result)
+    Ok(Json(result))
 }
 
 async fn response_patterns_handler() -> Json<Vec<SensitivePattern>> {

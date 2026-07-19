@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod plugin_test_support;
 
 use iaga_sentinel::config::env::{AppEnv, NodeEnv, ServiceMode};
+use iaga_sentinel::core::errors::SentinelError;
 use iaga_sentinel::core::types::RateLimitConfig;
 use iaga_sentinel::core::types::*;
 use iaga_sentinel::demo::scenarios::{demo_profiles, demo_scenarios, demo_workspace_policies};
@@ -782,4 +783,67 @@ async fn test_acp_payload_flows_through_pipeline() {
         result.normalized_payload.get("agentName"),
         Some(&serde_json::json!("planner"))
     );
+}
+
+/// SCOPE-DERIVE-1: the governance scope comes from the agent profile, not the
+/// request body. A caller that asserts a workspace it does not belong to is
+/// refused instead of being silently evaluated against that workspace's policy.
+#[tokio::test]
+async fn test_pipeline_rejects_foreign_workspace_id() {
+    let state = build_test_state().await;
+
+    let request = InspectRequest {
+        agent_id: "openclaw-builder-01".into(),
+        tenant_id: None,
+        // The seeded profile lives in ws-demo; ws-cli is a real, different
+        // workspace, which is what makes this a confused-deputy attempt rather
+        // than a typo.
+        workspace_id: Some("ws-cli".into()),
+        framework: "openclaw".into(),
+        protocol: Some(ProtocolKind::Mcp),
+        action: ActionDetail {
+            action_type: ActionType::FileRead,
+            tool_name: "filesystem.read".into(),
+            payload: payload(&[("path", serde_json::json!("README.md"))]),
+        },
+        requested_secrets: None,
+        metadata: session_metadata("it-scope-foreign-ws"),
+        usage: None,
+    };
+
+    let err = execute_pipeline(&request, &state)
+        .await
+        .expect_err("a foreign workspaceId must not be honoured");
+    assert!(
+        matches!(err, SentinelError::WorkspaceScopeMismatch { .. }),
+        "expected a scope mismatch, got {err:?}"
+    );
+}
+
+/// The same request without the field is unaffected: scope falls back to the
+/// profile, which is what every shipped SDK and adapter actually sends.
+#[tokio::test]
+async fn test_pipeline_derives_workspace_when_absent() {
+    let state = build_test_state().await;
+
+    let request = InspectRequest {
+        agent_id: "openclaw-builder-01".into(),
+        tenant_id: None,
+        workspace_id: None,
+        framework: "openclaw".into(),
+        protocol: Some(ProtocolKind::Mcp),
+        action: ActionDetail {
+            action_type: ActionType::FileRead,
+            tool_name: "filesystem.read".into(),
+            payload: payload(&[("path", serde_json::json!("README.md"))]),
+        },
+        requested_secrets: None,
+        metadata: session_metadata("it-scope-derived-ws"),
+        usage: None,
+    };
+
+    let result = execute_pipeline(&request, &state)
+        .await
+        .expect("an absent workspaceId must still resolve from the profile");
+    assert_eq!(result.profile.workspace_id, "ws-demo");
 }
