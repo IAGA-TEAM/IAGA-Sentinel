@@ -8,6 +8,41 @@
 
 ---
 
+## ⭐ Standing procedure for the AI agent (DO THIS EVERY TIME)
+
+If **you are an AI agent** reading this file, this is your default operating procedure. Do all of it,
+in order, without being asked again:
+
+1. **Start the dashboard server** (this is what serves the human-visible UI on `localhost`), using a
+   fixed database file so a second process can share it:
+   ```bash
+   IAGA_SENTINEL_OPEN_MODE=true DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" \
+     iaga serve --seed-demo --port 4010
+   ```
+   Wait until `GET http://localhost:4010/health` returns `{"ok":true}`.
+
+2. **Connect yourself over MCP.** Always launch the MCP governance server and speak MCP to it
+   yourself — **pointed at the same `DATABASE_URL`** so everything you govern lands in the dashboard:
+   ```bash
+   DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
+   ```
+   It speaks JSON-RPC (MCP `2024-11-05`) over **stdio** and exposes two tools — **`iaga.inspect`**
+   (govern an action → allow/review/block) and **`iaga.response_scan`** (scan a tool result for
+   leaked secrets/PII). Do the `initialize` → `tools/list` → `tools/call` handshake yourself before
+   every real action you take, and honor the verdict. Full details + a copy-paste handshake: **§7d**.
+
+3. **Hand the human the dashboard URL.** End your setup by telling the user, in plain words:
+   > "IAGA Sentinel is live. Open **http://localhost:4010/** to watch every action I take being
+   > governed in real time (Live feed, Evidence, Audit)."
+   Every `iaga.inspect` call you make appears there live, because the MCP server and the dashboard
+   share the same database.
+
+> **Why two processes?** `iaga mcp-server` is **stdio only — it does not serve the dashboard.** The
+> dashboard is served by `iaga serve` on `:4010`. Sharing one `DATABASE_URL` is what makes your
+> MCP-governed actions show up in the human's dashboard. This is verified to work end to end.
+
+---
+
 ## 0. TL;DR — fastest path to a live, agent-connected system
 
 **Windows / PowerShell (this repo's primary dev platform):**
@@ -285,10 +320,68 @@ Auth header is `Authorization: Bearer <api_key>`. Async: `AsyncSentinelClient`.
   crewai, autogen, llamaindex, mcp, claude-code, claude-agent-sdk, vercel-ai, pydantic-ai, ...).
 - **Released plugins:** `plug-ins/voltagent-plugin/`, `plug-ins/letta-plugin/`, `plug-ins/codex-plugin/`.
 - **TypeScript SDK:** `sdks/typescript/`.
-- **MCP:** run IAGA between an MCP client and a downstream MCP server (see §10 `proxy` / `mcp-server`).
+- **MCP (the recommended self-connect path):** speak MCP to `iaga mcp-server` — see **§7d**.
 
 Client-side env the adapters read: `IAGA_BASE_URL`, `IAGA_AGENT_ID`, `IAGA_SENTINEL_API_KEY`
 (the bearer token).
+
+### 7d. MCP — how an AI agent self-connects (the default path; verified working)
+
+This is the connection method the **standing procedure** at the top uses. `iaga mcp-server` exposes
+IAGA's governance as **MCP tools over stdio** (JSON-RPC, protocol `2024-11-05`), so any MCP client —
+Claude Desktop, Cursor, a custom agent, or you driving stdio directly — can govern its own actions.
+
+**Two tools exposed** (`tools/list`):
+- **`iaga.inspect`** — govern one action; returns `allow | review | block` + risk + full evidence.
+- **`iaga.response_scan`** — scan a tool's response payload for leaked secrets / PII.
+
+**Drive it yourself over stdio** (this exact exchange is verified — `initialize` → `tools/list` →
+`tools/call`, one JSON-RPC message per line on stdin):
+
+```bash
+printf '%s\n' \
+ '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"agent","version":"1.0"}}}' \
+ '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+ '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"iaga.inspect","arguments":{"agentId":"openclaw-builder-01","workspaceId":"ws-demo","framework":"openclaw","protocol":"mcp","action":{"type":"shell","toolName":"terminal.exec","payload":{"command":"rm -rf /var/lib/postgresql/data","intent":"cleanup"}}}}}' \
+ | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
+```
+
+Expected: `initialize` → `serverInfo iaga-sentinel 1.9.0`; `tools/list` → `[iaga.inspect,
+iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
+81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
+it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
+in the dashboard at `http://localhost:4010/`.
+
+**Register it in an MCP client** (Claude Desktop `claude_desktop_config.json`, Cursor
+`~/.cursor/mcp.json`, same shape):
+
+```json
+{
+  "mcpServers": {
+    "iaga-sentinel": {
+      "command": "iaga",
+      "args": ["mcp-server"],
+      "env": { "DATABASE_URL": "sqlite:iaga_shared.db?mode=rwc" }
+    }
+  }
+}
+```
+
+Use the same `DATABASE_URL` as your `iaga serve` dashboard so governed calls are visible there.
+
+**Health-check any MCP endpoint** with `iaga mcp-doctor` (flags go *before* `--command`; everything
+after `--command` is the downstream server + its args):
+
+```bash
+iaga mcp-doctor --format table --agent-id openclaw-builder-01 --command iaga mcp-server --seed-demo
+```
+
+It runs `initialize` + `tools/list`, checks each tool's `inputSchema`, and reports what the
+governance pipeline would allow/review/block (cooperative diagnostics, `authoritative: false`).
+
+**Other MCP shape:** `iaga proxy --agent-id <id> --command <downstream-mcp-server> [args...]` sits
+*between* an MCP client and a real downstream MCP server, governing every `tools/call` that passes
+through.
 
 ---
 
@@ -432,7 +525,11 @@ Routes: `crates/iaga-sentinel-core/src/server/create_server.rs`. Full spec: `doc
 - **Embedded in the binary — no separate build, no npm.** Source:
   `crates/iaga-sentinel-core/src/dashboard/dashboard.html`, rendered by
   `src/dashboard/index_html.rs`, served at `GET /`.
-- URL: **http://localhost:4010/**. Tabs: **Live feed** (SSE `/v1/events/stream`),
+- **Served by `iaga serve`, NOT by `iaga mcp-server`.** The MCP server is stdio-only. To give the
+  human a dashboard while an agent connects over MCP, run both on the **same `DATABASE_URL`** — the
+  MCP-governed actions then appear here live (verified: an `iaga.inspect` BLOCK over MCP shows up in
+  the dashboard's counters immediately).
+- URL to hand the user: **http://localhost:4010/**. Tabs: **Live feed** (SSE `/v1/events/stream`),
   **Evidence** (signed receipts), **Audit**.
 
 ---
