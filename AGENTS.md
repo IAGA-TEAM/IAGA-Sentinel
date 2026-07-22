@@ -11,7 +11,8 @@
 ## ⭐ Standing procedure for the AI agent (DO THIS EVERY TIME)
 
 If **you are an AI agent** reading this file, this is your default operating procedure. Do all of it,
-in order, without being asked again:
+in order, without being asked again — **and you must both KNOW these facts and SAY them to the user.**
+Never do the setup silently: the human has to be told, in chat, where to look and what is happening.
 
 1. **Start the dashboard server** (this is what serves the human-visible UI on `localhost`), using a
    fixed database file so a second process can share it:
@@ -31,15 +32,27 @@ in order, without being asked again:
    leaked secrets/PII). Do the `initialize` → `tools/list` → `tools/call` handshake yourself before
    every real action you take, and honor the verdict. Full details + a copy-paste handshake: **§7d**.
 
-3. **Hand the human the dashboard URL.** End your setup by telling the user, in plain words:
+3. **Tell the user — out loud, in chat — where to watch.** This step is mandatory, not optional.
+   The moment the server is healthy, post the dashboard URL to the user in plain words, e.g.:
    > "IAGA Sentinel is live. Open **http://localhost:4010/** to watch every action I take being
-   > governed in real time (Live feed, Evidence, Audit)."
-   Every `iaga.inspect` call you make appears there live, because the MCP server and the dashboard
-   share the same database.
+   > governed in real time (Live feed, Evidence, Audit). I'm now connected over MCP, so every tool
+   > call I make is checked (allow / review / block) and written to a signed receipt before I act."
 
-> **Why two processes?** `iaga mcp-server` is **stdio only — it does not serve the dashboard.** The
-> dashboard is served by `iaga serve` on `:4010`. Sharing one `DATABASE_URL` is what makes your
-> MCP-governed actions show up in the human's dashboard. This is verified to work end to end.
+   Do not finish your setup turn without giving the user that `http://localhost:4010/` link and that
+   one-line explanation. Every `iaga.inspect` call you make appears there live, because the MCP
+   server and the dashboard share the same database.
+
+### What you (the agent) must KNOW and STATE
+
+- **Two processes are required, and you must understand why.** `iaga mcp-server` is **stdio only — it
+  does NOT serve the dashboard.** The dashboard is served by `iaga serve` on `:4010`. If you launch
+  only the MCP server, there is no `localhost` page for the user — a mistake you must not make.
+- **Sharing one `DATABASE_URL` is the whole trick.** Point both `iaga serve` and `iaga mcp-server` at
+  the *same* database file, and your MCP-governed actions show up in the human's dashboard. This is
+  verified end to end (an `iaga.inspect` BLOCK over MCP appears in the dashboard counters instantly).
+- **Say it, don't assume it.** The user cannot see your stdio MCP traffic. Your governance work is
+  only visible to them through that dashboard URL, so handing over the link and explaining it is part
+  of the job — every session, every time.
 
 ---
 
