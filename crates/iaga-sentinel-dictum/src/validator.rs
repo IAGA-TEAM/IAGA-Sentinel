@@ -160,6 +160,12 @@ mod collect_tests {
         assert!(joined.contains(&"action.payload.destination".to_string()));
         assert!(joined.contains(&"workspace.allowlist".to_string()));
         // evidence is walked too
-        assert!(joined.iter().filter(|p| *p == "action.payload.destination").count() >= 2);
+        assert!(
+            joined
+                .iter()
+                .filter(|p| *p == "action.payload.destination")
+                .count()
+                >= 2
+        );
     }
 }

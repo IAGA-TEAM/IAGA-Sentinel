@@ -383,19 +383,13 @@ mod tests {
     #[test]
     fn unknown_root_is_rejected_at_load() {
         let err = load_err(r#"policy "p" { when tenant.id == "x" then block, reason="r" }"#);
-        assert!(matches!(
-            err,
-            DictumOverlayError::UnknownContextPath { .. }
-        ));
+        assert!(matches!(err, DictumOverlayError::UnknownContextPath { .. }));
     }
 
     #[test]
     fn deep_path_under_a_scalar_leaf_is_rejected() {
         let err = load_err(r#"policy "p" { when risk.score.inner == 1 then block, reason="r" }"#);
-        assert!(matches!(
-            err,
-            DictumOverlayError::UnknownContextPath { .. }
-        ));
+        assert!(matches!(err, DictumOverlayError::UnknownContextPath { .. }));
     }
 
     #[test]
