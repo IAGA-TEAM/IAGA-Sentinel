@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/badge-version.svg" alt="version 1.9.0" />
+  <img src="docs/media/badge-version.svg" alt="version 1.9.1" />
   <img src="docs/media/badge-license.svg" alt="license BUSL-1.1" />
   <img src="docs/media/badge-aiact.svg" alt="Supports EU AI Act Article 12 record-keeping" />
   <img src="docs/media/badge-rust.svg" alt="Rust stable" />
@@ -80,7 +80,7 @@ curl -s -X POST http://localhost:4010/v1/inspect -H 'Content-Type: application/j
 The receipt chain verifies with no server, no database and no network, using the standalone `iaga-verify` binary. That binary isn't in the Docker image, so install the CLI (still no clone) and run the same flow locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.0 --locked \
+cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.1 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo     # then POST /v1/inspect as above
 ```
@@ -95,7 +95,7 @@ Postgres (`--features postgres` + `DATABASE_URL`) and `docker compose up -d` are
 
 ---
 
-## Test me now (1.9.0)
+## Test me now (1.9.1)
 
 Do not take our word for it. The repository ships a self-contained demo kit that drives three real verdicts through the live pipeline and proves the receipt offline, on your own machine. Nothing is faked, and you get the same verdicts every run (the verdicts are stable; the exact risk integers drift slightly with agent trust, which the pipeline updates after each action). Two scripts under [`scripts/`](scripts/) and a runbook in [`docs/demo/README.md`](docs/demo/README.md). The primary path is Windows PowerShell; Linux and macOS use the `.sh` twins.
 

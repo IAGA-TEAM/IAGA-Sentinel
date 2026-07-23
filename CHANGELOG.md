@@ -19,6 +19,63 @@ early-access list.
 
 ---
 
+## [1.9.1], 2026-07-23
+
+Documentation release: **no change to runtime behavior, the public wire
+contract, the receipt schema, or the Dictum language.** Signed receipts produced
+by 1.9.0 verify unchanged. Ships `AGENTS.md`, a self-contained bootstrap manual
+that lets a human or an LLM agent stand the system up from a clean checkout, plus
+corrections to how Dictum's runtime behavior was described — every claim below was
+verified against a live server rather than read off the source.
+
+### Added
+
+- **`AGENTS.md`**, a self-contained bootstrap manual: repository layout, the
+  nine-crate workspace, build and run, the `iaga-sentinel.yaml` config, the HTTP
+  API, auth and API-key bootstrapping, the embedded dashboard, Dictum, the CLI,
+  receipts and offline verification, deploy, and every server environment
+  variable. Written so an agent can follow it without prior context.
+- A standing procedure for AI agents: encode your own operating instructions as a
+  Dictum policy, load it as an overlay, connect over MCP, and tell the user the
+  dashboard URL and which rules are in force.
+- MCP documentation covering the verified stdio handshake (`initialize` →
+  `tools/list` → `tools/call`), the two exposed tools `iaga.inspect` and
+  `iaga.response_scan`, Claude Desktop / Cursor configuration, and `mcp-doctor`.
+  Documents that `iaga mcp-server` is stdio-only and that sharing one
+  `DATABASE_URL` with `iaga serve` is what makes MCP-governed actions visible in
+  the dashboard.
+
+### Documented
+
+- **A Dictum policy referencing a context path that is absent at runtime blocks
+  every action, including unrelated ones.** A missing path resolves to null, the
+  ordering operators have no null case and raise an evaluation error, and an
+  evaluation error on a `block`/`review` policy fails closed. The default build
+  triggers this for budget policies, because `budget.limit` only exists when
+  `IAGA_SENTINEL_SESSION_BUDGET_USD` is set. Neither `policy lint` nor `policy
+  check` catches it. Documents the working guard, `when budget.limit and …`.
+- Policy attribution is surfaced in `auditEvent.reasons` as
+  `dictum[<name>]: <reason>`, **not** in `risk.reasons`, which carries only
+  baseline reasons — which is why a policy-driven block can look unexplained.
+- `policy_hash` is the SHA-256 of the **compiled policy AST**, not of the file
+  bytes: reformatting and comments leave it unchanged, any semantic edit changes
+  it, and it is bound into the signed receipt.
+- The `usage` object on `/v1/inspect` requires `provider` and `model`, and its
+  token fields are `promptTokens` / `completionTokens`. Spend counts toward
+  subsequent requests, so the request that exceeds a budget is itself allowed.
+- Two shipped example policies parse and type-check but over-block at runtime and
+  must not be copied: `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum`
+  references the non-existent `action.risk_score` and blocks every `shell`
+  action, and `crates/iaga-sentinel-core/examples/policies/strict.dictum`
+  compares a tool name against the domain allowlist and blocks every `http`
+  action. Both are left in place for this release and flagged in `AGENTS.md`.
+- `POST /v1/inspect` requires a **registered** `agentId` (an unknown one returns
+  `404 agent_not_found`), shell payloads use the key `command`, and minting an
+  API key ends open mode immediately — unauthenticated calls then return `401`
+  even with `IAGA_SENTINEL_OPEN_MODE=true`.
+
+---
+
 ## [1.9.0], 2026-07-19
 
 An **evidence-integrity and deployment** release, closing an external code

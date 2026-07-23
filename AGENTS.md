@@ -147,7 +147,7 @@ not describe it as a "gateway."
 
 ```
 agent-armor/                      # repo root (project name: IAGA Sentinel)
-├── Cargo.toml                    # workspace root (9 crates), version 1.9.0, MSRV 1.88, BUSL-1.1
+├── Cargo.toml                    # workspace root (9 crates), version 1.9.1, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
 ├── Dockerfile                    # 2-stage build -> ghcr.io/edoardobambini/iaga-sentinel
 ├── docker-compose.yml            # server + 2 named volumes (data + signer keys)
@@ -220,7 +220,7 @@ Notes:
 Install from git instead of building locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.0 --locked \
+cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.1 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 ```
 
@@ -385,7 +385,7 @@ printf '%s\n' \
  | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
 ```
 
-Expected: `initialize` → `serverInfo iaga-sentinel 1.9.0`; `tools/list` → `[iaga.inspect,
+Expected: `initialize` → `serverInfo iaga-sentinel 1.9.1`; `tools/list` → `[iaga.inspect,
 iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
 81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
 it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
@@ -620,7 +620,7 @@ with no attribution), so the suite can actually fail rather than always reportin
 
 ### 11c. ⚠️ Footgun: referencing a conditionally-present field blocks EVERYTHING
 
-**Verified on 1.9.0.** A policy whose condition references a context root that is absent at runtime
+**Verified on 1.9.1.** A policy whose condition references a context root that is absent at runtime
 causes *unrelated* actions to be **blocked**. Example — this policy alone:
 
 ```dictum
@@ -858,4 +858,4 @@ Client-side (adapters/plugins, not the server): `IAGA_BASE_URL`, `IAGA_AGENT_ID`
 
 ---
 
-*IAGA Sentinel v1.9.0 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*
+*IAGA Sentinel v1.9.1 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*
