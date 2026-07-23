@@ -14,15 +14,31 @@ If **you are an AI agent** reading this file, this is your default operating pro
 in order, without being asked again — **and you must both KNOW these facts and SAY them to the user.**
 Never do the setup silently: the human has to be told, in chat, where to look and what is happening.
 
-1. **Start the dashboard server** (this is what serves the human-visible UI on `localhost`), using a
-   fixed database file so a second process can share it:
+1. **Turn your own instructions into Dictum policy — this is your job, not the user's.** You almost
+   certainly already carry operating rules (a system prompt, `CLAUDE.md`, repo conventions, or things
+   the user told you: *"never touch production"*, *"ask before writing files"*, *"don't call external
+   APIs"*). Those rules are just intentions until they are enforced. **Encode them as a `.dictum`
+   policy file** so every action is checked against them and the check is written into signed
+   evidence. Write `agent_rules.dictum`, then validate it:
+   ```bash
+   iaga policy lint  agent_rules.dictum     # parses?
+   iaga policy check agent_rules.dictum     # type-checks?
+   ```
+   If you have no instructions to encode, **ask the user what their rules are** and write the policy
+   for them — do not skip this step silently. Full syntax, the exact context schema, verified example
+   policies and a serious footgun: **§11**.
+
+2. **Start the dashboard server** (this is what serves the human-visible UI on `localhost`), loading
+   your policy as an overlay and using a fixed database file so a second process can share it:
    ```bash
    IAGA_SENTINEL_OPEN_MODE=true DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" \
-     iaga serve --seed-demo --port 4010
+     iaga serve --seed-demo --port 4010 --policy agent_rules.dictum
    ```
-   Wait until `GET http://localhost:4010/health` returns `{"ok":true}`.
+   Wait until `GET http://localhost:4010/health` returns `{"ok":true}`, then confirm the policy
+   actually loaded with `GET /v1/policy/overlay` (expect `"loaded": true` and your `policyCount`).
+   The overlay is read **once at boot** — there is no hot reload, so restart after editing the policy.
 
-2. **Connect yourself over MCP.** Always launch the MCP governance server and speak MCP to it
+3. **Connect yourself over MCP.** Always launch the MCP governance server and speak MCP to it
    yourself — **pointed at the same `DATABASE_URL`** so everything you govern lands in the dashboard:
    ```bash
    DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
@@ -32,15 +48,18 @@ Never do the setup silently: the human has to be told, in chat, where to look an
    leaked secrets/PII). Do the `initialize` → `tools/list` → `tools/call` handshake yourself before
    every real action you take, and honor the verdict. Full details + a copy-paste handshake: **§7d**.
 
-3. **Tell the user — out loud, in chat — where to watch.** This step is mandatory, not optional.
-   The moment the server is healthy, post the dashboard URL to the user in plain words, e.g.:
+4. **Tell the user — out loud, in chat — where to watch AND what rules you put in force.** This step
+   is mandatory, not optional. The moment the server is healthy, post to the user, in plain words:
    > "IAGA Sentinel is live. Open **http://localhost:4010/** to watch every action I take being
-   > governed in real time (Live feed, Evidence, Audit). I'm now connected over MCP, so every tool
-   > call I make is checked (allow / review / block) and written to a signed receipt before I act."
+   > governed in real time (Live feed, Evidence, Audit). I'm connected over MCP, so every tool call I
+   > make is checked (allow / review / block) and written to a signed receipt before I act. I've
+   > encoded these rules as enforced policy: *never destroy production data*, *a human reviews every
+   > file write*, *no credentials to unapproved hosts* — tell me if you want them changed."
 
-   Do not finish your setup turn without giving the user that `http://localhost:4010/` link and that
-   one-line explanation. Every `iaga.inspect` call you make appears there live, because the MCP
-   server and the dashboard share the same database.
+   Do not finish your setup turn without giving the user that `http://localhost:4010/` link, that
+   one-line explanation, **and the plain-language list of the policies you loaded**. Every
+   `iaga.inspect` call you make appears there live, because the MCP server and the dashboard share
+   the same database.
 
 ### What you (the agent) must KNOW and STATE
 
@@ -53,6 +72,13 @@ Never do the setup silently: the human has to be told, in chat, where to look an
 - **Say it, don't assume it.** The user cannot see your stdio MCP traffic. Your governance work is
   only visible to them through that dashboard URL, so handing over the link and explaining it is part
   of the job — every session, every time.
+- **Policies are yours to author.** Do not wait to be asked to write them, and do not hand the user a
+  blank page: propose a starting `.dictum` from the instructions you already have, show it to them in
+  plain language, and let them correct it. An unenforced rule in a prompt is not governance — the
+  whole point of this product is that the rule is checked and the check is signed evidence.
+- **The overlay can only tighten, never loosen.** Dictum merges with the YAML baseline "stricter
+  wins", so a policy can turn an `allow` into `review`/`block` but can never turn a `block` into an
+  `allow`. Do not try to use policy to grant yourself permissions.
 
 ---
 
@@ -493,21 +519,170 @@ Separate binary: `iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]`
 
 ## 11. Dictum policy language
 
+**This is where you encode the agent's instructions as enforced rules.** See the standing procedure
+at the top of this file: writing this policy is part of your setup, every session.
+
 - Extension **`.dictum`**. Syntax:
-  `policy "name" { when <expr> [and <expr>] then block|review, reason="..." }`.
-- Builtins: `secret_ref()`, `url_host()`, `timestamp()`, `sha256()`. Context exposes `action.kind`,
-  `action.tool_name`, `risk.score`, `workspace.allowlist`.
-- Example policies: `crates/iaga-sentinel-core/examples/policies/strict.dictum`,
-  `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum` (+ `sample_context.json`),
-  `examples/e2e/secrets_and_egress.dictum`.
+  `policy "name" { when <expr> [and <expr>] then block|review|allow, reason="...", evidence=<expr> }`.
+- Builtins: `secret_ref(<payload>)`, `url_host(<string>)`, `timestamp()`, `sha256(<string>)`.
+- Example policies in the repo: `examples/e2e/secrets_and_egress.dictum` (**good** — correct idioms),
+  `crates/iaga-sentinel-core/examples/policies/strict.dictum` and
+  `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum` (+ `sample_context.json`) — these two
+  **parse fine but misbehave at runtime; do not copy them.** See §11d.
+
+### 11a. The runtime context you can reference
+
+Built in `crates/iaga-sentinel-core/src/pipeline/dictum_overlay.rs`. **Always present:**
+
+| Path | Meaning |
+|---|---|
+| `agent.id`, `agent.framework` | who is acting |
+| `action.kind` | one of `shell`, `file_read`, `file_write`, `http`, `db_query`, `email`, `custom` |
+| `action.tool_name` | e.g. `terminal.exec` |
+| `action.payload.<field>` | the raw action payload (e.g. `action.payload.command`, `.destination`) |
+| `workspace.id`, `workspace.allowlist` | the workspace and its **allowed domains** |
+| `risk.score` (0–100), `risk.decision` | the baseline verdict, before your overlay |
+
+**Conditionally present — dangerous, read §11c first:** `ml.*` (only with the `ml` feature and a
+loaded model), `usage.session_cost_usd` (only when a session cost is tracked), `budget.limit` (only
+when a budget is configured, e.g. `IAGA_SENTINEL_SESSION_BUDGET_USD`).
+
+> `workspace.allowlist` holds **domains** (it is `workspace_policy.allowed_domains`), so
+> `url_host(action.payload.destination) not in workspace.allowlist` is the correct idiom — see §11d
+> for the shipped example that gets this wrong.
+
+**These paths do NOT exist** (referencing them blocks everything — §11c): `action.url`,
+`action.risk_score`, `agent.role`, `tenant`, `protocol`, `metadata`, `requested_secrets`.
+
+### 11b. Translating instructions into policy (verified working)
+
+Typical agent instructions on the left, enforceable policy on the right. This file passes both
+`iaga policy lint` and `iaga policy check`:
+
+```dictum
+// "Never destroy production data."
+policy "never_destroy_production_data" {
+  when action.kind == "shell"
+   and risk.score > 50
+  then block, reason="destructive shell is outside my mandate"
+}
+
+// "Never send credentials to a host we haven't approved."
+policy "no_secret_egress_off_allowlist" {
+  when action.kind == "http"
+   and url_host(action.payload.destination) not in workspace.allowlist
+   and secret_ref(action.payload)
+  then block, reason="credentials must not leave approved hosts",
+       evidence=action.payload.destination
+}
+
+// "Ask me before you modify any file."
+policy "human_approves_file_writes" {
+  when action.kind == "file_write"
+  then review, reason="a human confirms every file modification"
+}
+```
+
+Load it, then confirm it is really in force:
+
+```bash
+iaga serve --seed-demo --policy agent_rules.dictum      # loads at boot; error -> exit 2
+curl -s http://localhost:4010/v1/policy/overlay
+# -> {"enabled":true,"loaded":true,"policyCount":3,"policyHash":"4531ee8e…","source":"agent_rules.dictum"}
+
+Then smoke-test that you did not over-block (see §11c): a benign `file_read` must still come back
+`allow`, while `rm -rf …` comes back `block`. Both verified with the policy above.
+```
+
+### 11c. ⚠️ Footgun: referencing a conditionally-present field blocks EVERYTHING
+
+**Verified on 1.9.0.** A policy whose condition references a context root that is absent at runtime
+causes *unrelated* actions to be **blocked**. Example — this policy alone:
+
+```dictum
+policy "stop_when_over_budget" {
+  when usage.session_cost_usd > budget.limit
+  then block, reason="session budget exhausted"
+}
+```
+
+With **no budget configured** (so `usage` and `budget` are never inserted into the context), a
+harmless `file_read` comes back `decision=block` with `risk.score=2` and
+`reasons=["no high-risk rule matched"]` — the baseline said allow, the overlay forced a block, and
+the reason given is misleading. Controlled comparison:
+
+| Policy loaded | Budget configured | `file_read` verdict |
+|---|---|---|
+| budget rule only | **no** | ❌ **block** |
+| a rule not touching `usage`/`budget` | n/a | ✅ allow |
+| budget rule only | **yes** (`IAGA_SENTINEL_SESSION_BUDGET_USD=5.00`) | ✅ allow |
+
+**`iaga policy lint` and `iaga policy check` both report OK on it** — the type checker cannot catch
+this, because it is a runtime-context problem, not a typing problem.
+
+**Why it happens** (source-verified): a missing path resolves to `Null` silently
+(`eval.rs:342`), the ordering operators `< > <= >=` have no `Null` case and raise an eval error
+(`eval.rs:324`), and `evaluate_program_traced` turns an eval error on a `block`/`review` policy into
+a **fail-closed fire** (`eval.rs:202-221`), which stricter-wins then promotes to the final verdict.
+`==` and `!=` never error, and `Null` is falsy — **only the ordering operators explode.**
+
+**The default build triggers it.** `cost-control` is a default feature, so `usage.session_cost_usd`
+is always present, but `budget.limit` only appears when `IAGA_SENTINEL_SESSION_BUDGET_USD` is set.
+`Float > Null` → error → block everything.
+
+**Guard pattern (verified working)** — `and` short-circuits on truthiness, so probe the field first:
+
+```dictum
+when budget.limit and usage.session_cost_usd > budget.limit
+```
+
+**Rule of thumb:** only reference `usage.*`, `budget.*` and `ml.*` behind that guard, and always
+smoke-test a benign action (a `file_read` must stay `allow`) after loading a new policy. Stick to the
+always-present fields in the §11a table and you are safe.
+
+### 11d. ⚠️ Two shipped example policies are broken — do not copy them
+
+Both parse and type-check cleanly, then over-block at runtime for exactly the §11c reason:
+
+| File | Bug | Runtime effect |
+|---|---|---|
+| `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum:18-22` | uses `action.risk_score`, which **does not exist** (the real field is `risk.score`) | `Null > 80` → eval error → **blocks every `shell` action** |
+| `crates/iaga-sentinel-core/examples/policies/strict.dictum:19-23` | uses `action.tool_name not in workspace.allowlist`, but the allowlist holds **domains** and `in` on a list is exact equality | a tool name never equals a domain → always true → **blocks every `http` action** |
+
+`crates/iaga-sentinel-dictum/examples/sample_context.json` has the same problem as documentation: it
+describes a context shape that does not exist at runtime (`action.risk_score`, no `risk` object, no
+`agent`). It is still fine as a `--context` fixture for `iaga policy test`, because there you supply
+the context yourself — just don't treat it as the real schema. **§11a is the real schema.**
+
+Use `examples/e2e/secrets_and_egress.dictum` as your reference example instead, or the §11b policy.
+
+### 11e. Other semantics worth knowing
+
+- **A path pointing at an object evaluates to `Null`** (`eval.rs:365`). So bare `action.payload`,
+  `ml`, `workspace`, `risk`, `agent`, `action` are all `Null`; drill down to scalar leaves. Arrays
+  cannot be indexed (`workspace.allowlist.0` is `Null`) — they are only usable whole, with `in`.
+- **`secret_ref(action.payload)` is special-cased** to receive the raw JSON subtree, which is why it
+  works on a whole object while a bare path does not.
+- **`in` / `not in`**: exact element equality when the right side is a **list**; **substring match**
+  when it is a **string**; anything else is an eval error (→ fail-closed).
+- **`url_host()`** lowercases and strips scheme/userinfo/port/path/query/fragment, and matching is
+  exact-host: an allowlist entry `example.com` does **not** cover `api.example.com`. That is
+  deliberate — it defeats look-alike hosts like `hooks.slack.com.attacker.tld`.
 - Loaded via `iaga serve --policy <file>` as an **overlay** on the YAML baseline: **"stricter wins"**,
   it can only tighten. Its SHA-256 is embedded in every receipt's `policy_hash`. Load error → exit 2.
   No hot reload. Overlay status: `GET /v1/policy/overlay`.
-- Test/validate offline:
+- Test/validate offline — run these against **your own** policy:
   ```bash
-  iaga policy lint  crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum
-  iaga policy check crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum
-  iaga policy test  crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum \
+  iaga policy lint  agent_rules.dictum     # parses?
+  iaga policy check agent_rules.dictum     # type-checks?
+  iaga policy test  agent_rules.dictum --context some_context.json
+  ```
+  Remember: passing `lint` and `check` does **not** mean the policy is safe — neither catches the
+  §11c footgun. The only reliable check is loading it and smoke-testing a benign action.
+
+  The upstream fixture still works as a `--context` demo (its schema is not the runtime one, §11d):
+  ```bash
+  iaga policy test crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum \
        --context crates/iaga-sentinel-dictum/examples/sample_context.json
   ```
 
