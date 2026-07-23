@@ -592,6 +592,30 @@ curl -s http://localhost:4010/v1/policy/overlay
 
 Then smoke-test that you did not over-block (see §11c): a benign `file_read` must still come back
 `allow`, while `rm -rf …` comes back `block`. Both verified with the policy above.
+
+> **Where to see that a policy actually fired.** The attribution lands in
+> **`auditEvent.reasons`**, as `dictum[<policy_name>]: <your reason>` — **not** in `risk.reasons`,
+> which keeps only the baseline reasons. So a policy-driven block looks like
+> `decision=block`, `risk.score=2`, `risk.reasons=["no high-risk rule matched"]`, and the real
+> explanation sits in `auditEvent.reasons`. Always look there when debugging a policy.
+
+**Verified functionally** (9-case suite, each on its own port + database):
+
+| Behaviour | Result |
+|---|---|
+| No policy loaded → baseline untouched | ✅ |
+| Policy tightens `allow` → `review` | ✅ |
+| Policy tightens `allow` → `block` | ✅ |
+| Policy **cannot** relax `block` → `allow` (stricter wins) | ✅ |
+| `url_host()` + `secret_ref()` block a secret sent to an off-allowlist host | ✅ |
+| Same policy does **not** fire on a clean call to an allowed host | ✅ |
+| Guard pattern (§11c) keeps a benign action `allow` | ✅ |
+| Guarded budget policy fires once real spend exceeds the budget | ✅ |
+| A non-matching policy never fires | ✅ |
+| `policy_hash` of the loaded overlay is bound into the signed receipt | ✅ |
+
+Falsification controls were included (same payload against a no-policy server must come back `allow`
+with no attribution), so the suite can actually fail rather than always reporting success.
 ```
 
 ### 11c. ⚠️ Footgun: referencing a conditionally-present field blocks EVERYTHING
@@ -606,10 +630,12 @@ policy "stop_when_over_budget" {
 }
 ```
 
-With **no budget configured** (so `usage` and `budget` are never inserted into the context), a
-harmless `file_read` comes back `decision=block` with `risk.score=2` and
-`reasons=["no high-risk rule matched"]` — the baseline said allow, the overlay forced a block, and
-the reason given is misleading. Controlled comparison:
+With **no budget configured** (so `budget` is never inserted into the context), a harmless
+`file_read` comes back `decision=block` with `risk.score=2` and
+`risk.reasons=["no high-risk rule matched"]`. The baseline said allow and the overlay forced the
+block — and because `risk.reasons` only ever carries baseline reasons, the block looks unexplained
+unless you know to read `auditEvent.reasons`, where it appears as
+`dictum[stop_when_over_budget]: dictum-eval-error`. Controlled comparison:
 
 | Policy loaded | Budget configured | `file_read` verdict |
 |---|---|---|
@@ -635,6 +661,20 @@ is always present, but `budget.limit` only appears when `IAGA_SENTINEL_SESSION_B
 ```dictum
 when budget.limit and usage.session_cost_usd > budget.limit
 ```
+
+For a budget policy to ever fire, the caller must actually report usage. The `usage` object on
+`/v1/inspect` is `UsageReport` (`crates/iaga-sentinel-cost/src/usage.rs:29`) and **`provider` and
+`model` are required**; token fields are `promptTokens` / `completionTokens` (not
+`inputTokens`/`outputTokens`), and `costUsd` overrides the pricing table:
+
+```json
+"usage": {"provider":"openai","model":"gpt-4o","promptTokens":1000,"completionTokens":1000,"costUsd":2.00}
+```
+
+Verified: with `IAGA_SENTINEL_SESSION_BUDGET_USD=0.50`, a request carrying that usage records the
+spend (`/v1/cost/summary` → `grossCostUsd: 2.0`) and the **next** request is blocked by the guarded
+policy. Note the ordering — spend is counted for *subsequent* requests, so the request that blows
+the budget is itself allowed.
 
 **Rule of thumb:** only reference `usage.*`, `budget.*` and `ml.*` behind that guard, and always
 smoke-test a benign action (a `file_read` must stay `allow`) after loading a new policy. Stick to the
@@ -669,8 +709,13 @@ Use `examples/e2e/secrets_and_egress.dictum` as your reference example instead, 
   exact-host: an allowlist entry `example.com` does **not** cover `api.example.com`. That is
   deliberate — it defeats look-alike hosts like `hooks.slack.com.attacker.tld`.
 - Loaded via `iaga serve --policy <file>` as an **overlay** on the YAML baseline: **"stricter wins"**,
-  it can only tighten. Its SHA-256 is embedded in every receipt's `policy_hash`. Load error → exit 2.
-  No hot reload. Overlay status: `GET /v1/policy/overlay`.
+  it can only tighten (verified: an `allow`-everything policy cannot unblock a `block`). Load error
+  → exit 2. **No hot reload** — restart after editing. Overlay status: `GET /v1/policy/overlay`.
+- **`policy_hash` is the SHA-256 of the compiled policy AST, not of the file bytes**
+  (`compute_policy_hash`, `dictum_overlay.rs:118`). Verified consequence: reformatting or adding
+  comments leaves the hash **unchanged**, while any semantic edit (e.g. `block` → `review`) changes
+  it. That hash is bound into every signed receipt, so the evidence records *which policy semantics*
+  produced the verdict.
 - Test/validate offline — run these against **your own** policy:
   ```bash
   iaga policy lint  agent_rules.dictum     # parses?
