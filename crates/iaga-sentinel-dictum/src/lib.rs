@@ -51,7 +51,7 @@ pub use eval::{
 };
 pub use parser::parse;
 pub use types::{infer, Ty, TypeEnv, TypeError};
-pub use validator::validate;
+pub use validator::{collect_paths, validate};
 
 #[cfg(feature = "dictum-wasm")]
 pub use wasm::{compile_to_wasm, WasmCompileError, WasmProgram};

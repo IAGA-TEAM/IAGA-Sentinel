@@ -42,6 +42,88 @@ pub enum DictumOverlayError {
         #[source]
         source: serde_json::Error,
     },
+    /// A policy references a context path this host will never populate.
+    /// Fatal at startup **on purpose**: left to run, the path would resolve to
+    /// `Null`, an ordering comparison against `Null` would raise an eval error,
+    /// and `evaluate_program_traced` would fail closed — blocking every single
+    /// action, including ones the policy has nothing to do with. Catching the
+    /// typo here turns a silent deny-all into a startup message.
+    #[error(
+        "unknown context path `{path_ref}` in Dictum file `{path}`. \
+         Valid roots: agent.{{id,framework}}, action.{{kind,tool_name,payload.*}}, \
+         workspace.{{id,allowlist}}, risk.{{score,decision}}, ml.*, \
+         usage.session_cost_usd, budget.limit"
+    )]
+    UnknownContextPath { path: String, path_ref: String },
+}
+
+/// The context `build_overlay_context` actually produces. `None` marks a root
+/// whose subtree is open (any leaf is legal); `Some(leaves)` is a closed set.
+///
+/// Keep this in sync with `build_overlay_context` below — the unit test
+/// `schema_matches_built_context` fails if a root is added there and not here.
+const CONTEXT_SCHEMA: &[(&str, Option<&[&str]>)] = &[
+    ("agent", Some(&["id", "framework"])),
+    ("action", Some(&["kind", "tool_name", "payload"])),
+    ("workspace", Some(&["id", "allowlist"])),
+    ("risk", Some(&["score", "decision"])),
+    ("ml", None),
+    ("usage", Some(&["session_cost_usd"])),
+    ("budget", Some(&["limit"])),
+];
+
+/// Roots that exist only under some feature/configuration combinations.
+/// Referencing one is legal but needs a truthiness guard
+/// (`when budget.limit and usage.session_cost_usd > budget.limit`), so we warn.
+const CONDITIONAL_ROOTS: &[&str] = &["ml", "usage", "budget"];
+
+/// Reject any path the runtime context cannot provide. Returns the
+/// conditional roots that were referenced, so the caller can warn about them.
+fn validate_context_paths(
+    program: &Program,
+    path_str: &str,
+) -> Result<Vec<String>, DictumOverlayError> {
+    let mut conditional_used: Vec<String> = Vec::new();
+    for segs in iaga_sentinel_dictum::collect_paths(program) {
+        let rendered = segs.join(".");
+        let root = match segs.first() {
+            Some(r) => r.as_str(),
+            None => continue,
+        };
+        let leaves = match CONTEXT_SCHEMA.iter().find(|(name, _)| *name == root) {
+            Some((_, leaves)) => *leaves,
+            None => {
+                return Err(DictumOverlayError::UnknownContextPath {
+                    path: path_str.to_string(),
+                    path_ref: rendered,
+                })
+            }
+        };
+        if CONDITIONAL_ROOTS.contains(&root) && !conditional_used.iter().any(|r| r == root) {
+            conditional_used.push(root.to_string());
+        }
+        // Open subtree (ml.*), or a bare root reference: nothing more to check.
+        let (Some(allowed), Some(second)) = (leaves, segs.get(1)) else {
+            continue;
+        };
+        if !allowed.contains(&second.as_str()) {
+            return Err(DictumOverlayError::UnknownContextPath {
+                path: path_str.to_string(),
+                path_ref: rendered,
+            });
+        }
+        // `action.payload` is a verbatim caller-supplied object: anything
+        // below it is legal. Every other leaf is a scalar, so a deeper path
+        // could only ever resolve to Null.
+        let deeper_is_open = root == "action" && second == "payload";
+        if !deeper_is_open && segs.len() > 2 {
+            return Err(DictumOverlayError::UnknownContextPath {
+                path: path_str.to_string(),
+                path_ref: rendered,
+            });
+        }
+    }
+    Ok(conditional_used)
 }
 
 pub struct DictumOverlay {
@@ -63,6 +145,19 @@ impl DictumOverlay {
                 path: path.display().to_string(),
                 source: e,
             })?;
+        // Reject paths this host can never populate, before the overlay is
+        // allowed to judge a single request. See UnknownContextPath.
+        let conditional = validate_context_paths(&program, &path.display().to_string())?;
+        if !conditional.is_empty() {
+            tracing::warn!(
+                source = %path.display(),
+                roots = %conditional.join(", "),
+                "dictum overlay references context roots that only exist under some \
+                 configurations; guard them (e.g. `when budget.limit and \
+                 usage.session_cost_usd > budget.limit`) or the policy fails closed \
+                 and blocks every action when they are absent"
+            );
+        }
         let policy_hash =
             compute_policy_hash(&program).map_err(|e| DictumOverlayError::PolicyHash {
                 path: path.display().to_string(),
@@ -244,6 +339,168 @@ pub fn build_overlay_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn load_src(src: &str) -> Result<DictumOverlay, DictumOverlayError> {
+        let dir = std::env::temp_dir().join(format!(
+            "iaga-dictum-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("policy.dictum");
+        std::fs::write(&file, src).expect("write policy");
+        let out = DictumOverlay::load(&file);
+        let _ = std::fs::remove_file(&file);
+        out
+    }
+
+    /// `DictumOverlay` holds a compiled program and deliberately isn't `Debug`,
+    /// so `expect_err` is unavailable; unwrap the error side by hand.
+    fn load_err(src: &str) -> DictumOverlayError {
+        match load_src(src) {
+            Ok(_) => panic!("expected the policy to be rejected at load, but it loaded"),
+            Err(e) => e,
+        }
+    }
+
+    /// Regression: a policy referencing a path the context never provides used
+    /// to load fine and then fail closed on *every* request, blocking actions
+    /// the policy had nothing to do with. It must now be refused at load.
+    #[test]
+    fn unknown_context_path_is_rejected_at_load() {
+        // `action.risk_score` does not exist; the real field is `risk.score`.
+        let err = load_err(
+            r#"policy "p" { when action.kind == "shell" and action.risk_score > 80 then block, reason="r" }"#,
+        );
+        match err {
+            DictumOverlayError::UnknownContextPath { path_ref, .. } => {
+                assert_eq!(path_ref, "action.risk_score");
+            }
+            other => panic!("expected UnknownContextPath, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_root_is_rejected_at_load() {
+        let err = load_err(r#"policy "p" { when tenant.id == "x" then block, reason="r" }"#);
+        assert!(matches!(
+            err,
+            DictumOverlayError::UnknownContextPath { .. }
+        ));
+    }
+
+    #[test]
+    fn deep_path_under_a_scalar_leaf_is_rejected() {
+        let err = load_err(r#"policy "p" { when risk.score.inner == 1 then block, reason="r" }"#);
+        assert!(matches!(
+            err,
+            DictumOverlayError::UnknownContextPath { .. }
+        ));
+    }
+
+    #[test]
+    fn real_context_paths_load_fine() {
+        // Every always-present root, plus an arbitrarily deep action.payload
+        // path (the payload is a verbatim caller-supplied object) and the
+        // guarded conditional roots.
+        let overlay = load_src(
+            r#"
+            policy "a" {
+              when action.kind == "http"
+               and url_host(action.payload.destination) not in workspace.allowlist
+               and secret_ref(action.payload)
+              then block, reason="r", evidence=action.payload.destination
+            }
+            policy "b" {
+              when agent.id == "x" and agent.framework == "y"
+               and action.tool_name == "t" and workspace.id == "w"
+               and risk.score > 10 and risk.decision == "allow"
+              then review, reason="r"
+            }
+            policy "c" {
+              when budget.limit and usage.session_cost_usd > budget.limit
+              then block, reason="r"
+            }
+            "#,
+        )
+        .expect("valid paths must load");
+        assert_eq!(overlay.policy_count(), 3);
+    }
+
+    /// The shipped example overlays must actually be loadable by the host.
+    #[test]
+    fn shipped_example_policies_load() {
+        for rel in [
+            "examples/policies/strict.dictum",
+            "../iaga-sentinel-dictum/examples/no_pii_egress.dictum",
+        ] {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            if !p.exists() {
+                continue;
+            }
+            DictumOverlay::load(&p)
+                .unwrap_or_else(|e| panic!("shipped example {rel} must load, got: {e}"));
+        }
+    }
+
+    /// Guards against drift between `CONTEXT_SCHEMA` (what the loader accepts)
+    /// and `build_overlay_context` (what the runtime actually provides). A root
+    /// present in one and missing from the other is how the deny-all bug got in.
+    #[test]
+    fn schema_matches_built_context() {
+        use crate::core::types::{ActionDetail, ActionType, InspectRequest};
+        use std::collections::HashMap;
+        let req = InspectRequest {
+            agent_id: "a".into(),
+            tenant_id: None,
+            workspace_id: None,
+            framework: "test".into(),
+            protocol: None,
+            action: ActionDetail {
+                action_type: ActionType::Http,
+                tool_name: "t".into(),
+                payload: HashMap::new(),
+            },
+            requested_secrets: None,
+            metadata: None,
+            usage: None,
+        };
+        // Everything switched on, so every root the builder can emit is present.
+        let ctx = build_overlay_context(
+            &req,
+            10,
+            GovernanceDecision::Allow,
+            Some("ws"),
+            &[],
+            Some(&serde_json::json!({})),
+            Some(1.0),
+            Some(2.0),
+        );
+        let built = ctx.root.as_object().expect("context is an object");
+
+        for (root, leaves) in CONTEXT_SCHEMA {
+            let value = built
+                .get(*root)
+                .unwrap_or_else(|| panic!("CONTEXT_SCHEMA lists `{root}`, builder never emits it"));
+            if let Some(leaves) = leaves {
+                let obj = value
+                    .as_object()
+                    .unwrap_or_else(|| panic!("`{root}` should be an object"));
+                for leaf in *leaves {
+                    assert!(
+                        obj.contains_key(*leaf),
+                        "CONTEXT_SCHEMA lists `{root}.{leaf}`, builder never emits it"
+                    );
+                }
+            }
+        }
+        for root in built.keys() {
+            assert!(
+                CONTEXT_SCHEMA.iter().any(|(name, _)| name == root),
+                "builder emits root `{root}` that CONTEXT_SCHEMA would reject"
+            );
+        }
+    }
 
     #[test]
     fn overlay_context_includes_cost_when_provided() {

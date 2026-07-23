@@ -17,7 +17,7 @@ policy "no_secrets_to_public_http" {
 
 policy "halt_on_hijack_suspicion" {
   when action.kind == "shell"
-   and action.risk_score > 80
+   and risk.score > 80
   then block, reason="injection suspected"
 }
 

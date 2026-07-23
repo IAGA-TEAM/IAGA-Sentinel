@@ -3,7 +3,7 @@ name: iaga-sentinel
 description: IAGA Sentinel — EU AI Act conformity evidence layer for AI agents
 type: application
 version: 0.1.0
-appVersion: 1.9.1
+appVersion: 1.9.2
 kubeVersion: ">= 1.24"
 home: https://iaga.tech
 icon: https://iaga.tech/icon.png

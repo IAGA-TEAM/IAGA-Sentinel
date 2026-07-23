@@ -18,6 +18,6 @@ policy "review_all_email_egress" {
 
 policy "block_off_allowlist_http" {
   when action.kind == "http"
-   and action.tool_name not in workspace.allowlist
+   and url_host(action.payload.destination) not in workspace.allowlist
   then block, reason="off-allowlist http egress"
 }

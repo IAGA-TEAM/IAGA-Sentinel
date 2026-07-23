@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IAGA Sentinel API
-  version: 1.9.1
+  version: 1.9.2
   description: >
     IAGA Sentinel is the EU AI Act conformity evidence layer for AI agents.
     It intercepts tool calls, evaluates risk against typed policies, and
@@ -1895,7 +1895,7 @@ components:
           example: gateway
         version:
           type: string
-          example: 1.9.1
+          example: 1.9.2
         authRequired:
           type: boolean
           description: True unless open mode is on and no keys exist

@@ -147,7 +147,7 @@ not describe it as a "gateway."
 
 ```
 agent-armor/                      # repo root (project name: IAGA Sentinel)
-├── Cargo.toml                    # workspace root (9 crates), version 1.9.1, MSRV 1.88, BUSL-1.1
+├── Cargo.toml                    # workspace root (9 crates), version 1.9.2, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
 ├── Dockerfile                    # 2-stage build -> ghcr.io/edoardobambini/iaga-sentinel
 ├── docker-compose.yml            # server + 2 named volumes (data + signer keys)
@@ -220,7 +220,7 @@ Notes:
 Install from git instead of building locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.1 --locked \
+cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.2 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 ```
 
@@ -385,7 +385,7 @@ printf '%s\n' \
  | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
 ```
 
-Expected: `initialize` → `serverInfo iaga-sentinel 1.9.1`; `tools/list` → `[iaga.inspect,
+Expected: `initialize` → `serverInfo iaga-sentinel 1.9.2`; `tools/list` → `[iaga.inspect,
 iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
 81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
 it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
@@ -618,10 +618,21 @@ Falsification controls were included (same payload against a no-policy server mu
 with no attribution), so the suite can actually fail rather than always reporting success.
 ```
 
-### 11c. ⚠️ Footgun: referencing a conditionally-present field blocks EVERYTHING
+### 11c. ⚠️ Footgun: referencing a field the context does not provide
 
-**Verified on 1.9.1.** A policy whose condition references a context root that is absent at runtime
-causes *unrelated* actions to be **blocked**. Example — this policy alone:
+> **Fixed in 1.9.2 for the common case.** A policy that references a path the runtime context can
+> *never* provide (a typo like `action.risk_score` instead of `risk.score`, or an unknown root) is
+> now **rejected when the overlay loads**: the server prints the offending path plus the valid roots
+> and exits `2`. It can no longer reach production and block everything.
+>
+> What remains your responsibility is the **conditionally-present** roots — `usage.*`, `budget.*`,
+> `ml.*` — which are legal paths that simply do not exist in every configuration. Referencing one
+> logs a warning at load; guard it as shown below or it will still block everything when absent.
+
+The rest of this section explains the failure mode, because it is worth understanding.
+
+A policy whose condition references a context root that is absent at runtime causes *unrelated*
+actions to be **blocked**. Example — this policy alone:
 
 ```dictum
 policy "stop_when_over_budget" {
@@ -644,7 +655,8 @@ unless you know to read `auditEvent.reasons`, where it appears as
 | budget rule only | **yes** (`IAGA_SENTINEL_SESSION_BUDGET_USD=5.00`) | ✅ allow |
 
 **`iaga policy lint` and `iaga policy check` both report OK on it** — the type checker cannot catch
-this, because it is a runtime-context problem, not a typing problem.
+this, because it is a runtime-context problem, not a typing problem. This is why the check moved to
+overlay load time (1.9.2): `iaga serve --policy` is the only place that knows the real context.
 
 **Why it happens** (source-verified): a missing path resolves to `Null` silently
 (`eval.rs:342`), the ordering operators `< > <= >=` have no `Null` case and raise an eval error
@@ -680,21 +692,21 @@ the budget is itself allowed.
 smoke-test a benign action (a `file_read` must stay `allow`) after loading a new policy. Stick to the
 always-present fields in the §11a table and you are safe.
 
-### 11d. ⚠️ Two shipped example policies are broken — do not copy them
+### 11d. Two shipped example policies were broken — fixed in 1.9.2
 
-Both parse and type-check cleanly, then over-block at runtime for exactly the §11c reason:
+Both parsed and type-checked cleanly, then over-blocked at runtime for exactly the §11c reason. They
+are corrected now, and a test asserts the shipped examples still load:
 
-| File | Bug | Runtime effect |
+| File | Was | Now |
 |---|---|---|
-| `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum:18-22` | uses `action.risk_score`, which **does not exist** (the real field is `risk.score`) | `Null > 80` → eval error → **blocks every `shell` action** |
-| `crates/iaga-sentinel-core/examples/policies/strict.dictum:19-23` | uses `action.tool_name not in workspace.allowlist`, but the allowlist holds **domains** and `in` on a list is exact equality | a tool name never equals a domain → always true → **blocks every `http` action** |
+| `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum` | `action.risk_score > 80` — a path that does not exist, so `Null > 80` errored and **blocked every `shell` action** | `risk.score > 80` |
+| `crates/iaga-sentinel-core/examples/policies/strict.dictum` | `action.tool_name not in workspace.allowlist` — the allowlist holds **domains** and `in` on a list is exact equality, so it was always true and **blocked every `http` action** | `url_host(action.payload.destination) not in workspace.allowlist` |
 
-`crates/iaga-sentinel-dictum/examples/sample_context.json` has the same problem as documentation: it
-describes a context shape that does not exist at runtime (`action.risk_score`, no `risk` object, no
-`agent`). It is still fine as a `--context` fixture for `iaga policy test`, because there you supply
-the context yourself — just don't treat it as the real schema. **§11a is the real schema.**
+`crates/iaga-sentinel-dictum/examples/sample_context.json` was also rewritten: it used to describe a
+context shape that does not exist at runtime, and now mirrors §11a.
 
-Use `examples/e2e/secrets_and_egress.dictum` as your reference example instead, or the §11b policy.
+Either example is now a fine reference, as is `examples/e2e/secrets_and_egress.dictum` and the §11b
+policy.
 
 ### 11e. Other semantics worth knowing
 
@@ -858,4 +870,4 @@ Client-side (adapters/plugins, not the server): `IAGA_BASE_URL`, `IAGA_AGENT_ID`
 
 ---
 
-*IAGA Sentinel v1.9.1 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*
+*IAGA Sentinel v1.9.2 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*

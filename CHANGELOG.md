@@ -19,6 +19,56 @@ early-access list.
 
 ---
 
+## [1.9.2], 2026-07-23
+
+Fixes a way to accidentally deny **all** traffic. A Dictum overlay policy that
+referenced a context path the runtime never provides — a typo such as
+`action.risk_score` instead of `risk.score` — used to load without complaint and
+then block every action, including ones the policy had nothing to do with, with a
+reason that pointed at the baseline rather than the policy. Two policies shipped
+in this repository had exactly that bug.
+
+Receipt bytes, the wire contract, and the Dictum language are unchanged; 1.9.0
+and 1.9.1 receipts verify unchanged. The only behavioral change is that a policy
+which could never have worked is now refused at startup instead of at runtime.
+
+### Fixed
+
+- **An unknown context path is rejected when the overlay loads.**
+  `iaga serve --policy` now validates every path a policy references against the
+  context the pipeline actually builds, and exits `2` naming the offending path
+  and the valid roots. Previously such a policy loaded, then every request hit an
+  eval error on the missing path, and the deliberate fail-closed rule
+  (PIP-DICTUM-FAILOPEN) turned that into a block. **The fail-closed behavior is
+  unchanged and intentional** — an attacker must not be able to error a guard to
+  disable it. What changed is that an authoring mistake no longer reaches the
+  point where that rule applies.
+- `crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum` used
+  `action.risk_score`, which does not exist, and blocked every `shell` action.
+  It now uses `risk.score`.
+- `crates/iaga-sentinel-core/examples/policies/strict.dictum` compared
+  `action.tool_name` against `workspace.allowlist`, which holds domains, so the
+  membership test was always true and it blocked every `http` action. It now uses
+  `url_host(action.payload.destination)`.
+- `crates/iaga-sentinel-dictum/examples/sample_context.json` described a context
+  shape the runtime never produces; it now mirrors the real one.
+
+### Added
+
+- `iaga_sentinel_dictum::collect_paths`, which returns every context path a
+  program references from both `when` and `evidence`. The language crate stays
+  host-agnostic; the embedder supplies the schema.
+- A load-time warning when a policy references a root that exists only under some
+  configurations (`usage`, `budget`, `ml`), pointing at the guard idiom
+  `when budget.limit and usage.session_cost_usd > budget.limit`. These remain
+  legal, so they warn rather than fail.
+- Regression tests: an unknown path, an unknown root and a path below a scalar
+  leaf are each refused at load; the always-present roots load; the shipped
+  example policies must load; and `schema_matches_built_context` fails if the
+  accepted schema and the built context ever drift apart.
+
+---
+
 ## [1.9.1], 2026-07-23
 
 Documentation release: **no change to runtime behavior, the public wire
