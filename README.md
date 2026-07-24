@@ -275,4 +275,6 @@ bundle or redistribute them — you install each framework's own package separat
 
 Source available under [**Business Source License 1.1**](LICENSE) with **Change License Apache-2.0**: copy, modify, and redistribute freely, and use in production — the one exception is offering IAGA Sentinel, or a substantially similar AI agent governance service derived from it, to third parties as a hosted or managed service (see the Additional Use Grant in the [LICENSE](LICENSE)). Four years after each release is published, that release converts automatically and irrevocably to Apache-2.0; the conversion is written into the license itself.
 
+**No warranty, no liability.** IAGA Sentinel is provided **"AS IS"**, with no warranty and no liability for damages. It is an *advisory* layer (every receipt is stamped `is_authoritative: false`) — it does not itself enforce or guarantee anything, and **you are responsible for testing and validating it before relying on it in production**. See [DISCLAIMER.md](DISCLAIMER.md) and the *Limitation of Liability* section of the [LICENSE](LICENSE).
+
 Repository: <https://github.com/EdoardoBambini/IAGA-Sentinel> · Documentation: <https://www.iaga.tech/docs> · Contact: `info@iaga.tech`
