@@ -183,10 +183,19 @@ mod tests {
         // Unset / empty / unknown all default to Sidecar (not Gateway).
         assert_eq!(parse_service_mode(None), ServiceMode::Sidecar);
         assert_eq!(parse_service_mode(Some("".into())), ServiceMode::Sidecar);
-        assert_eq!(parse_service_mode(Some("proxy".into())), ServiceMode::Sidecar);
-        assert_eq!(parse_service_mode(Some("sidecar".into())), ServiceMode::Sidecar);
+        assert_eq!(
+            parse_service_mode(Some("proxy".into())),
+            ServiceMode::Sidecar
+        );
+        assert_eq!(
+            parse_service_mode(Some("sidecar".into())),
+            ServiceMode::Sidecar
+        );
         // Only the explicit opt-in selects Gateway.
-        assert_eq!(parse_service_mode(Some("gateway".into())), ServiceMode::Gateway);
+        assert_eq!(
+            parse_service_mode(Some("gateway".into())),
+            ServiceMode::Gateway
+        );
         assert_eq!(
             parse_service_mode(Some("  gateway  ".into())),
             ServiceMode::Gateway

@@ -28,8 +28,9 @@ pub fn validate_schema(tool_name: &str, payload: &HashMap<String, Value>) -> (bo
 fn check_intent_advisory(payload: &HashMap<String, Value>, advisory: &mut Vec<String>) {
     match payload.get("intent") {
         Some(Value::String(s)) if s.len() >= 3 => {}
-        Some(Value::String(_)) => advisory
-            .push("intent: advisory — provide at least 3 characters for clearer evidence".to_string()),
+        Some(Value::String(_)) => advisory.push(
+            "intent: advisory — provide at least 3 characters for clearer evidence".to_string(),
+        ),
         Some(_) => advisory.push("intent: advisory — expected a string".to_string()),
         None => {
             advisory.push("intent: advisory — omitted; include it for clearer evidence".to_string())
@@ -138,7 +139,10 @@ mod tests {
             ]),
         );
         assert!(valid);
-        assert_eq!(findings, vec!["payload matched MCP tool schema".to_string()]);
+        assert_eq!(
+            findings,
+            vec!["payload matched MCP tool schema".to_string()]
+        );
     }
 
     #[test]
@@ -170,7 +174,10 @@ mod tests {
                 ("content", json!("hello")),
             ]),
         );
-        assert!(valid, "filesystem.write with path+content must be schema-valid");
+        assert!(
+            valid,
+            "filesystem.write with path+content must be schema-valid"
+        );
 
         let (valid, findings) = validate_schema(
             "filesystem.write",
@@ -184,6 +191,8 @@ mod tests {
     fn unknown_tool_is_invalid() {
         let (valid, findings) = validate_schema("totally.unknown", &payload(&[]));
         assert!(!valid);
-        assert!(findings.iter().any(|f| f.contains("no MCP schema registered")));
+        assert!(findings
+            .iter()
+            .any(|f| f.contains("no MCP schema registered")));
     }
 }
