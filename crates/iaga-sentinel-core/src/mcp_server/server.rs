@@ -204,7 +204,15 @@ fn tool_definitions() -> Vec<McpToolInfo> {
     vec![
         McpToolInfo {
             name: TOOL_INSPECT.to_string(),
-            description: Some("Run an IAGA Sentinel governance inspection".to_string()),
+            description: Some(
+                "Run an IAGA Sentinel governance inspection on an action before you take it. \
+                 Returns allow | review | block plus risk and signed evidence. \
+                 action.payload should carry the target tool's fields — filesystem.read: {path}; \
+                 filesystem.write: {path, content}; terminal.exec: {command}; \
+                 http.fetch: {method, destination}. An `intent` string is optional but recommended \
+                 (it enriches the receipt; it is not required and never causes a block on its own)."
+                    .to_string(),
+            ),
             input_schema: Some(json!({
                 "type": "object",
                 "required": ["agentId", "framework", "action"],
@@ -231,7 +239,10 @@ fn tool_definitions() -> Vec<McpToolInfo> {
                                 "enum": ["shell", "file_read", "file_write", "http", "db_query", "email", "custom"]
                             },
                             "toolName": { "type": "string" },
-                            "payload": { "type": "object" }
+                            "payload": {
+                                "type": "object",
+                                "description": "Target tool's fields. filesystem.read: {path}; filesystem.write: {path, content}; terminal.exec: {command}; http.fetch: {method, destination}. Optional `intent` (string) is recommended for the evidence trail but never required."
+                            }
                         }
                     }
                 }
@@ -461,5 +472,82 @@ mod tests {
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"]["decision"], "allow");
         assert_eq!(result["structuredContent"]["protocol"], "mcp");
+    }
+
+    /// Regression (F2): `iaga mcp-server` used to build `AppState` with
+    /// `dictum_overlay = None`, so an agent's authored policy never governed the
+    /// calls it made over MCP — it only shared a database with `iaga serve`.
+    /// With the overlay present, the MCP inspect path must apply it. Here a
+    /// policy tightens an otherwise-`allow` `file_read` to `review`, and the
+    /// attribution must surface in `auditEvent.reasons`.
+    #[cfg(feature = "dictum")]
+    #[tokio::test]
+    async fn test_tools_call_inspect_applies_dictum_overlay() {
+        use crate::pipeline::dictum_overlay::DictumOverlay;
+
+        let dir = std::env::temp_dir().join(format!(
+            "iaga-mcp-overlay-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("agent_rules.dictum");
+        std::fs::write(
+            &file,
+            r#"policy "human_reviews_reads" { when action.kind == "file_read" then review, reason="a human reviews reads" }"#,
+        )
+        .expect("write policy");
+        let overlay = DictumOverlay::load(&file).expect("overlay must load");
+        let _ = std::fs::remove_file(&file);
+
+        let mut state = build_state().await;
+        Arc::get_mut(&mut state)
+            .expect("state is uniquely owned here")
+            .dictum_overlay = Some(Arc::new(overlay));
+
+        let mut arguments = HashMap::new();
+        arguments.insert("agentId".to_string(), json!("mcp-server-agent"));
+        arguments.insert("workspaceId".to_string(), json!("ws-mcp-server"));
+        arguments.insert("framework".to_string(), json!("mcp"));
+        arguments.insert("protocol".to_string(), json!("mcp"));
+        arguments.insert(
+            "action".to_string(),
+            json!(ActionDetail {
+                action_type: ActionType::FileRead,
+                tool_name: "filesystem.read".into(),
+                payload: HashMap::from([
+                    ("path".to_string(), json!("README.md")),
+                    ("intent".to_string(), json!("read documentation")),
+                ]),
+            }),
+        );
+
+        let response = handle_request(
+            &JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: Some(json!(4)),
+                method: "tools/call".into(),
+                params: json!({ "name": TOOL_INSPECT, "arguments": arguments }),
+            },
+            &state,
+        )
+        .await
+        .expect("tools/call should return a response");
+
+        let result = response.result.expect("tools/call should return result");
+        assert_eq!(
+            result["structuredContent"]["decision"], "review",
+            "overlay must tighten the MCP verdict from allow to review"
+        );
+        let reasons = result["structuredContent"]["auditEvent"]["reasons"]
+            .as_array()
+            .expect("auditEvent.reasons should be an array");
+        assert!(
+            reasons.iter().any(|r| r
+                .as_str()
+                .map(|s| s.contains("dictum[human_reviews_reads]"))
+                .unwrap_or(false)),
+            "overlay attribution must appear in auditEvent.reasons, got: {reasons:?}"
+        );
     }
 }

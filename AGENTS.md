@@ -10,72 +10,133 @@
 
 ## ⭐ Standing procedure for the AI agent (DO THIS EVERY TIME)
 
-If **you are an AI agent** reading this file, this is your default operating procedure. Do all of it,
-in order, without being asked again — **and you must both KNOW these facts and SAY them to the user.**
-Never do the setup silently: the human has to be told, in chat, where to look and what is happening.
+If **you are an AI agent** reading this file, this is your default operating procedure. Run it
+proactively, in order — **but stop and wait for the user twice**: they **approve your rules before you
+enforce them** (gate 1), and they **confirm your test calls are visible in the dashboard before you
+sign off** (gate 2). Everything between the gates you do yourself. **You must both KNOW these facts and
+SAY them to the user.** Never do the setup silently: the human has to be told, in chat, where to look
+and what is happening. **Speak to the user in English by default** — switch to Italian (or their
+language) only if they prefer it. The messages below are templates: say them in the user's language.
 
-1. **Turn your own instructions into Dictum policy — this is your job, not the user's.** You almost
-   certainly already carry operating rules (a system prompt, `CLAUDE.md`, repo conventions, or things
-   the user told you: *"never touch production"*, *"ask before writing files"*, *"don't call external
-   APIs"*). Those rules are just intentions until they are enforced. **Encode them as a `.dictum`
-   policy file** so every action is checked against them and the check is written into signed
-   evidence. Write `agent_rules.dictum`, then validate it:
+> **Step 0 — get a runnable `iaga` and a clean slate.** `iaga` is usually **not** on your `PATH` after
+> a plain `cargo build`; the binary lands in `target/release/`. Build it (or install it onto PATH), and
+> start from a **fresh database** — per-agent trust persists in the DB and re-hydrates on restart, so a
+> stale DB makes verdicts drift and your smoke tests non-deterministic:
+> ```bash
+> cargo build --release -p iaga-sentinel-core -p iaga-sentinel-verify   # -> target/release/iaga[.exe]
+> # optional, to get `iaga` on PATH:  cargo install --path crates/iaga-sentinel-core
+> rm -f iaga_shared.db iaga_shared.db-wal iaga_shared.db-shm            # clean slate
+> ```
+> Below, **`iaga` means `./target/release/iaga`** (`.\target\release\iaga.exe` on Windows) unless you
+> installed it on PATH. To see the whole mechanical loop end to end (build → policy → serve → MCP →
+> two test calls → offline proof) **non-interactively** — i.e. without the two human gates below — run
+> **`.\scripts\agent_bootstrap.ps1`** (or `./scripts/agent_bootstrap.sh`). When you are actually working
+> *with* a user, follow the gated steps 1–5 instead so they approve the rules and watch the calls land.
+
+1. **[GATE 1] Discover your OWN rules by reading your memory/instruction files, then get the user's OK
+   — do NOT enforce anything yet.** **Do not invent plausible-sounding rules.** Go and *read the files
+   that actually define how you operate* and extract the concrete rules from them — this is a real step
+   you perform now, with your file tools:
+   - **Your memory files** — the `.md` files in your memory directory. For Claude Code these live under
+     `~/.claude/projects/<project-slug>/memory/*.md` (Windows: `%USERPROFILE%\.claude\projects\...\memory\`);
+     the **`feedback_*.md`** files are literally "how you should work" and the `project_*.md` files hold
+     project constraints. Read them (start from `MEMORY.md`, the index).
+   - **`CLAUDE.md` / this `AGENTS.md` / repo conventions**, your **system prompt**, and anything the
+     user told you this session (*"never touch production"*, *"commit only when asked"*, *"ask before
+     writing files"*).
+
+   For each rule you find, decide whether it is **action-governance** — does it constrain a concrete
+   action (`shell`, `file_write`, `http`, `db_query`, …)? Only those can be encoded as Dictum. Rules
+   that are copy, positioning, or design judgment (*"it's not a gateway"*, *"keep it minimal"*) are
+   **not** encodable as action policy — say so and keep them as notes; do not fake a policy for them.
+   Translate each encodable rule into a `.dictum` policy and **cite which memory file it came from**.
+
+   Then **show the user the derived rules in plain language, each with its source, and ask for approval
+   before you load anything.** Post something like:
+   > "I read my memory files and these are the rules I actually carry; I'd enforce them as policy:
+   >  • [from `feedback_no_claude_coauthor`] block commits carrying a *Co-Authored-By: Claude* trailer
+   >  • [from `feedback_license_busl`] review any change to `LICENSE`
+   >  • never destroy production data.
+   >  Do they look right? Tell me to change any, or say **go** and I'll put them in force."
+
+   **Wait for the user's answer. Do not write or load the policy until they approve** — if they correct
+   a rule, adjust and re-show it. If your memory is empty, ask the user what their rules are. Full
+   syntax, the context schema, verified example policies and a serious footgun: **§11**.
+
+2. **On approval, write `agent_rules.dictum` and validate it** (parses? type-checks?):
    ```bash
-   iaga policy lint  agent_rules.dictum     # parses?
-   iaga policy check agent_rules.dictum     # type-checks?
+   iaga policy lint  agent_rules.dictum
+   iaga policy check agent_rules.dictum
    ```
-   If you have no instructions to encode, **ask the user what their rules are** and write the policy
-   for them — do not skip this step silently. Full syntax, the exact context schema, verified example
-   policies and a serious footgun: **§11**.
 
-2. **Start the dashboard server** (this is what serves the human-visible UI on `localhost`), loading
-   your policy as an overlay and using a fixed database file so a second process can share it:
+3. **Start the dashboard server** (the human-visible UI on `localhost`) with your approved policy as an
+   overlay, on a fixed database a second process can share:
    ```bash
    IAGA_SENTINEL_OPEN_MODE=true DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" \
      iaga serve --seed-demo --port 4010 --policy agent_rules.dictum
    ```
-   Wait until `GET http://localhost:4010/health` returns `{"ok":true}`, then confirm the policy
-   actually loaded with `GET /v1/policy/overlay` (expect `"loaded": true` and your `policyCount`).
-   The overlay is read **once at boot** — there is no hot reload, so restart after editing the policy.
+   Wait until `GET http://localhost:4010/health` returns `{"ok":true}`, then confirm the policy loaded
+   with `GET /v1/policy/overlay` (expect `"loaded": true` and your `policyCount`). The overlay is read
+   **once at boot** — no hot reload, so restart after editing the policy.
 
-3. **Connect yourself over MCP.** Always launch the MCP governance server and speak MCP to it
-   yourself — **pointed at the same `DATABASE_URL`** so everything you govern lands in the dashboard:
+4. **Connect yourself over MCP — same `DATABASE_URL` AND same `--policy` as your `serve`:**
    ```bash
-   DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
+   DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server --policy agent_rules.dictum
    ```
+   > **Pass `--policy` here too — this is not optional.** `iaga mcp-server` shares the *database* with
+   > `iaga serve` (so your calls show up in the dashboard) but **not** its in-memory policy overlay. If
+   > you launch `mcp-server` *without* `--policy`, the MCP verdicts you get back **ignore your policy** —
+   > your rules would appear nowhere in the decision, only the calls would be logged. Load the same file
+   > in both processes so the policy actually governs the actions you take. (Verified: an identical
+   > `filesystem.read` returns `allow` with no overlay and `review` with your overlay loaded.)
+
    It speaks JSON-RPC (MCP `2024-11-05`) over **stdio** and exposes two tools — **`iaga.inspect`**
    (govern an action → allow/review/block) and **`iaga.response_scan`** (scan a tool result for
    leaked secrets/PII). Do the `initialize` → `tools/list` → `tools/call` handshake yourself before
    every real action you take, and honor the verdict. Full details + a copy-paste handshake: **§7d**.
 
-4. **Tell the user — out loud, in chat — where to watch AND what rules you put in force.** This step
-   is mandatory, not optional. The moment the server is healthy, post to the user, in plain words:
-   > "IAGA Sentinel is live. Open **http://localhost:4010/** to watch every action I take being
-   > governed in real time (Live feed, Evidence, Audit). I'm connected over MCP, so every tool call I
-   > make is checked (allow / review / block) and written to a signed receipt before I act. I've
-   > encoded these rules as enforced policy: *never destroy production data*, *a human reviews every
-   > file write*, *no credentials to unapproved hosts* — tell me if you want them changed."
+5. **[GATE 2] Announce the dashboard, make two live test calls, wait for the user to confirm — then
+   greet them.** The moment the server is healthy, post, in plain words:
+   > "IAGA Sentinel is live. Open **http://localhost:4010/** and click **Live feed** — I'm about to make
+   >  two test calls so you can watch them land in real time. Every tool call I make is checked
+   >  (allow / review / block) and written to a signed receipt before I act. The rules you approved are
+   >  in force: *never destroy production data*, *a human reviews every file write*, *no credentials to
+   >  unapproved hosts*."
 
-   Do not finish your setup turn without giving the user that `http://localhost:4010/` link, that
-   one-line explanation, **and the plain-language list of the policies you loaded**. Every
-   `iaga.inspect` call you make appears there live, because the MCP server and the dashboard share
-   the same database.
+   Then make **two real `iaga.inspect` calls over MCP** — one that **allows** and one that **blocks**
+   (e.g. a benign `filesystem.read`, then `rm -rf /var/lib/postgresql/data`) — so the dashboard counters
+   and Live feed update in front of the user. Tell them what to look for: *"you should see one **allow**
+   and one **block** appear."*
+
+   **Wait for the user to confirm they can see the two calls in the dashboard (gate 2).** Only once they
+   give the OK, print this line in chat, **exactly**:
+
+   ```
+   IAGA SENTINEL IN IT, WELCOME TO THE RODEO
+   ```
+
+   Never print that line before the user has confirmed the dashboard is updating — it is the sign-off
+   that the whole loop (rules approved → enforced → visible) works end to end.
 
 ### What you (the agent) must KNOW and STATE
 
 - **Two processes are required, and you must understand why.** `iaga mcp-server` is **stdio only — it
   does NOT serve the dashboard.** The dashboard is served by `iaga serve` on `:4010`. If you launch
   only the MCP server, there is no `localhost` page for the user — a mistake you must not make.
-- **Sharing one `DATABASE_URL` is the whole trick.** Point both `iaga serve` and `iaga mcp-server` at
-  the *same* database file, and your MCP-governed actions show up in the human's dashboard. This is
-  verified end to end (an `iaga.inspect` BLOCK over MCP appears in the dashboard counters instantly).
+- **Sharing one `DATABASE_URL` makes actions *visible*; sharing one `--policy` makes them *governed*.**
+  Point both `iaga serve` and `iaga mcp-server` at the *same* database file, and your MCP-governed
+  actions show up in the human's dashboard (verified: an `iaga.inspect` BLOCK over MCP appears in the
+  counters instantly). But the database is only shared *state*, not the live overlay: load the **same
+  `--policy` file in both processes**, or the MCP verdict ignores your rules while still logging the
+  call. Visibility and enforcement are two separate switches — you need both.
 - **Say it, don't assume it.** The user cannot see your stdio MCP traffic. Your governance work is
   only visible to them through that dashboard URL, so handing over the link and explaining it is part
   of the job — every session, every time.
-- **Policies are yours to author.** Do not wait to be asked to write them, and do not hand the user a
-  blank page: propose a starting `.dictum` from the instructions you already have, show it to them in
-  plain language, and let them correct it. An unenforced rule in a prompt is not governance — the
-  whole point of this product is that the rule is checked and the check is signed evidence.
+- **Policies are yours to draft, the user's to approve.** Do not wait to be asked to *draft* them, and
+  do not hand the user a blank page: propose a starting `.dictum` from the instructions you already
+  have and show it in plain language. But **do not load it until the user approves it (gate 1)** — then
+  let them correct it and re-show. An unenforced rule in a prompt is not governance — the whole point of
+  this product is that the rule is checked and the check is signed evidence.
 - **The overlay can only tighten, never loosen.** Dictum merges with the YAML baseline "stricter
   wins", so a policy can turn an `allow` into `review`/`block` but can never turn a `block` into an
   `allow`. Do not try to use policy to grant yourself permissions.
@@ -83,6 +144,19 @@ Never do the setup silently: the human has to be told, in chat, where to look an
 ---
 
 ## 0. TL;DR — fastest path to a live, agent-connected system
+
+**AI agent? One command runs the whole standing procedure over MCP and proves your policy is enforced:**
+
+```powershell
+.\scripts\agent_bootstrap.ps1 -Build     # Windows;  ./scripts/agent_bootstrap.sh --build  on Linux/macOS
+```
+
+It builds, writes+validates `agent_rules.dictum`, serves **and** self-connects over MCP with the *same*
+`--policy`, then drives three governed beats — proving an identical `filesystem.read` returns `allow`
+for a normal file but `review` for a sensitive one **because of your policy** (`dictum[…]` attribution),
+and `rm -rf` is blocked. Everything lands in the dashboard at `http://localhost:4010/`.
+
+**Human recording the classic demo (Allow → Review → Block + offline proof):**
 
 **Windows / PowerShell (this repo's primary dev platform):**
 
@@ -147,7 +221,7 @@ not describe it as a "gateway."
 
 ```
 agent-armor/                      # repo root (project name: IAGA Sentinel)
-├── Cargo.toml                    # workspace root (9 crates), version 1.9.2, MSRV 1.88, BUSL-1.1
+├── Cargo.toml                    # workspace root (9 crates), version 2.0.0, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
 ├── Dockerfile                    # 2-stage build -> ghcr.io/edoardobambini/iaga-sentinel
 ├── docker-compose.yml            # server + 2 named volumes (data + signer keys)
@@ -220,7 +294,7 @@ Notes:
 Install from git instead of building locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.2 --locked \
+cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v2.0.0 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 ```
 
@@ -382,14 +456,20 @@ printf '%s\n' \
  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"agent","version":"1.0"}}}' \
  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"iaga.inspect","arguments":{"agentId":"openclaw-builder-01","workspaceId":"ws-demo","framework":"openclaw","protocol":"mcp","action":{"type":"shell","toolName":"terminal.exec","payload":{"command":"rm -rf /var/lib/postgresql/data","intent":"cleanup"}}}}}' \
- | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server
+ | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server --policy agent_rules.dictum
 ```
 
-Expected: `initialize` → `serverInfo iaga-sentinel 1.9.2`; `tools/list` → `[iaga.inspect,
+Expected: `initialize` → `serverInfo iaga-sentinel 2.0.0`; `tools/list` → `[iaga.inspect,
 iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
 81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
 it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
 in the dashboard at `http://localhost:4010/`.
+
+> **Payload shape over MCP (`protocol: mcp`).** The payload must carry the target tool's fields:
+> `filesystem.read` needs `path`; `filesystem.write` needs `path` + `content`; `terminal.exec` needs
+> `command`; `http.fetch` needs `method` + `destination`. An `intent` string is **recommended** (it
+> enriches the receipt) but is **advisory** — it no longer forces a block when missing. An unknown tool
+> name, or a missing *structural* field, still fails schema validation and blocks.
 
 **Register it in an MCP client** (Claude Desktop `claude_desktop_config.json`, Cursor
 `~/.cursor/mcp.json`, same shape):
@@ -503,13 +583,13 @@ Global: `--db <url>`. Subcommands (some behind feature flags):
 | `audit [--limit] [--format json\|table]` | Dump the audit log. |
 | `cost [summary\|by-model\|by-agent\|by-tool\|budget] [--from --to --limit]` | Cost reporting (`cost-control`). |
 | `replay [run_id] [--verify-only] [--list] [--limit] [--re-execute] [--export <file>]` | Receipt replay/export (`receipts`). |
-| `proxy --agent-id --command [args...]` | Govern MCP tool calls between a client and a downstream MCP server. |
-| `mcp-server [--seed-demo]` | Expose governance tools over stdio (MCP). |
+| `proxy --agent-id --command [args...] [--policy <file>]` | Govern MCP tool calls between a client and a downstream MCP server. |
+| `mcp-server [--seed-demo] [--policy <file>]` | Expose governance tools over stdio (MCP). **Pass `--policy` to enforce your overlay on MCP calls** — see the standing procedure and §7d. |
 | `mcp-doctor --command [args] [--probe-tool] [--format]` | Health-check an MCP endpoint. |
 | `policy {test\|lint\|check\|compile}` | Dictum tooling (`dictum` feature; `compile` needs `dictum-wasm`). |
 | `plugins {list\|validate\|verify\|sign-manifest\|verify-manifest\|attest}` | Plugin tooling. |
 | `reasoning info` | Reasoning plane status (`reasoning`). |
-| `run --agent-id [--cwd] -- <cmd...>` | Launch a child under the userspace enforcement kernel (`kernel`). |
+| `run --agent-id [--cwd] [--policy <file>] -- <cmd...>` | Launch a child under the userspace enforcement kernel (`kernel`). |
 | `kernel status` | Kernel status. |
 
 Separate binary: `iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]`
@@ -715,6 +795,13 @@ policy.
   cannot be indexed (`workspace.allowlist.0` is `Null`) — they are only usable whole, with `in`.
 - **`secret_ref(action.payload)` is special-cased** to receive the raw JSON subtree, which is why it
   works on a whole object while a bare path does not.
+  > **`secret_ref()` detects RAW credential material, not `secretref://` references.** It scans the
+  > subtree for actual secrets — AWS keys (`AKIA…`), PEM private-key blocks, high-entropy tokens — and
+  > returns true only when it finds one. A `secretref://prod/github/token` *pointer* (the kind the
+  > seeded REVIEW scenario carries in `requestedSecrets`) is **not** raw material, so `secret_ref` does
+  > **not** fire on it. That is a different mechanism: `requestedSecrets` + the vault/secret-plan drive
+  > the seeded review, while `secret_ref` guards against a plaintext credential sitting in the payload.
+  > To see `no_secret_egress_off_allowlist` fire, put an actual credential string in the payload.
 - **`in` / `not in`**: exact element equality when the right side is a **list**; **substring match**
   when it is a **string**; anything else is an eval error (→ fail-closed).
 - **`url_host()`** lowercases and strips scheme/userinfo/port/path/query/fragment, and matching is
@@ -836,7 +923,7 @@ plugin-manifest-signing --lib`, `--features cost-control`, `--features postgres`
 | `IAGA_SENTINEL_BOOTSTRAP_API_KEY` | registers the first admin key at startup |
 | `IAGA_SENTINEL_SIGNER_KEY_PATH` | `~/.iaga-sentinel/keys/receipt_signer.ed25519` |
 | `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED` | refuse to start if no receipt logger |
-| `IAGA_SENTINEL_DEFAULT_MODE` | `sidecar` / `gateway` |
+| `IAGA_SENTINEL_DEFAULT_MODE` | `sidecar` (default) / `gateway`. Reported by `/health`. Sidecar matches the product's advisory positioning; set `gateway` only if you deliberately want that framing. |
 | `IAGA_SENTINEL_CORS_ORIGINS` | comma-separated; unset = permissive |
 | `IAGA_SENTINEL_LOG_FORMAT` / `IAGA_SENTINEL_LOG_LEVEL` / `RUST_LOG` | logging |
 | `IAGA_SENTINEL_AUTH_CACHE_TTL_MS` | auth cache (0 disables) |
@@ -870,4 +957,4 @@ Client-side (adapters/plugins, not the server): `IAGA_BASE_URL`, `IAGA_AGENT_ID`
 
 ---
 
-*IAGA Sentinel v1.9.2 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*
+*IAGA Sentinel v2.0.0 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*

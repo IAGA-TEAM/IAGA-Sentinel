@@ -230,6 +230,12 @@ enum Commands {
         /// Arguments for the downstream command
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+
+        /// Load a Dictum policy file as an overlay (same semantics as
+        /// `serve --policy`); tightens the verdict on every proxied tool call.
+        #[cfg(feature = "dictum")]
+        #[arg(long, value_name = "FILE")]
+        policy: Option<String>,
     },
 
     /// Run as MCP server: expose IAGA Sentinel governance tools over stdio
@@ -237,6 +243,14 @@ enum Commands {
         /// Seed demo data on startup so inspect calls work out of the box
         #[arg(long, default_value_t = true)]
         seed_demo: bool,
+
+        /// Load a Dictum policy file as an overlay, exactly like `serve --policy`.
+        /// REQUIRED for your authored policy to actually govern the MCP calls you
+        /// make here: `mcp-server` shares a database with `serve` but not its
+        /// in-memory overlay, so without this the MCP verdict ignores your policy.
+        #[cfg(feature = "dictum")]
+        #[arg(long, value_name = "FILE")]
+        policy: Option<String>,
     },
 
     /// Health-check an MCP endpoint: drive initialize + tools/list, check each
@@ -291,6 +305,12 @@ enum Commands {
         /// Optional working directory for the child
         #[arg(long)]
         cwd: Option<String>,
+
+        /// Load a Dictum policy file as an overlay (same semantics as
+        /// `serve --policy`); tightens the launch verdict for the child process.
+        #[cfg(feature = "dictum")]
+        #[arg(long, value_name = "FILE")]
+        policy: Option<String>,
 
         /// Program to execute, followed by its arguments after `--`
         #[arg(trailing_var_arg = true, required = true)]
@@ -630,11 +650,31 @@ async fn main() {
             agent_id,
             command,
             args,
+            #[cfg(feature = "dictum")]
+            policy,
         }) => {
-            cmd_proxy(&db_url, &agent_id, &command, args).await;
+            cmd_proxy(
+                &db_url,
+                &agent_id,
+                &command,
+                args,
+                #[cfg(feature = "dictum")]
+                policy.as_deref(),
+            )
+            .await;
         }
-        Some(Commands::McpServer { seed_demo }) => {
-            cmd_mcp_server(&db_url, seed_demo).await;
+        Some(Commands::McpServer {
+            seed_demo,
+            #[cfg(feature = "dictum")]
+            policy,
+        }) => {
+            cmd_mcp_server(
+                &db_url,
+                seed_demo,
+                #[cfg(feature = "dictum")]
+                policy.as_deref(),
+            )
+            .await;
         }
         Some(Commands::McpDoctor {
             agent_id,
@@ -673,8 +713,22 @@ async fn main() {
             }
         },
         #[cfg(feature = "kernel")]
-        Some(Commands::Run { agent_id, cwd, cmd }) => {
-            let code = cmd_kernel_run(&db_url, &agent_id, cwd.as_deref(), &cmd).await;
+        Some(Commands::Run {
+            agent_id,
+            cwd,
+            #[cfg(feature = "dictum")]
+            policy,
+            cmd,
+        }) => {
+            let code = cmd_kernel_run(
+                &db_url,
+                &agent_id,
+                cwd.as_deref(),
+                #[cfg(feature = "dictum")]
+                policy.as_deref(),
+                &cmd,
+            )
+            .await;
             process::exit(code);
         }
         #[cfg(feature = "kernel")]
@@ -774,6 +828,36 @@ fn print_banner(port: u16) {
     eprintln!();
     eprintln!("    {dim}Press Ctrl+C to shut down{reset}");
     eprintln!();
+}
+
+/// Load a Dictum overlay from an optional `--policy` path, or `None` if no path
+/// was given. Fail-fast (`exit 2`) on any load error — if the operator asked for
+/// Dictum, they want Dictum. Shared by every long-running governance surface
+/// (`serve`, `mcp-server`, `proxy`, `run`) so that pointing them all at the same
+/// `--policy FILE` enforces the *same* overlay, not just a shared database. This
+/// is what makes an agent's authored policy actually govern the calls it makes
+/// over MCP, rather than only appear in the dashboard.
+#[cfg(feature = "dictum")]
+fn load_dictum_overlay(
+    policy_path: Option<&str>,
+) -> Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> {
+    let p = policy_path?;
+    use iaga_sentinel::pipeline::dictum_overlay::DictumOverlay;
+    match DictumOverlay::load(std::path::Path::new(p)) {
+        Ok(o) => {
+            tracing::info!(
+                policies = o.policy_count(),
+                hash = o.policy_hash(),
+                source = %o.source_path().display(),
+                "M6: Dictum policy overlay loaded"
+            );
+            Some(Arc::new(o))
+        }
+        Err(e) => {
+            eprintln!("Dictum load failed: {}", e);
+            process::exit(2);
+        }
+    }
 }
 
 async fn cmd_serve(
@@ -975,28 +1059,7 @@ async fn cmd_serve(
     // *before* the receipt logger so the bundle digest can be embedded
     // in every receipt's `policy_hash` field.
     #[cfg(feature = "dictum")]
-    let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> =
-        match policy_path {
-            None => None,
-            Some(p) => {
-                use iaga_sentinel::pipeline::dictum_overlay::DictumOverlay;
-                match DictumOverlay::load(std::path::Path::new(p)) {
-                    Ok(o) => {
-                        tracing::info!(
-                            policies = o.policy_count(),
-                            hash = o.policy_hash(),
-                            source = %o.source_path().display(),
-                            "M6: Dictum policy overlay loaded"
-                        );
-                        Some(Arc::new(o))
-                    }
-                    Err(e) => {
-                        eprintln!("Dictum load failed: {}", e);
-                        process::exit(2);
-                    }
-                }
-            }
-        };
+    let dictum_overlay = load_dictum_overlay(policy_path);
 
     #[cfg(feature = "dictum")]
     let policy_hash_override = dictum_overlay.as_ref().map(|o| o.policy_hash().to_string());
@@ -2170,7 +2233,13 @@ async fn seed_demo_data(policy_store: &Arc<dyn PolicyStore>) {
     tracing::info!("Demo data seeded");
 }
 
-async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String>) {
+async fn cmd_proxy(
+    db_url: &str,
+    agent_id: &str,
+    command: &str,
+    args: Vec<String>,
+    #[cfg(feature = "dictum")] policy_path: Option<&str>,
+) {
     use iaga_sentinel::mcp_proxy::proxy_server::{run_mcp_proxy, McpProxyConfig};
 
     let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
@@ -2184,11 +2253,16 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
         webhooks::DeadLetterQueue::new(),
     )));
 
-    let receipts = try_build_receipt_logger(db_url, None).await;
+    #[cfg(feature = "dictum")]
+    let dictum_overlay = load_dictum_overlay(policy_path);
+    #[cfg(feature = "dictum")]
+    let policy_hash_override = dictum_overlay.as_ref().map(|o| o.policy_hash().to_string());
+    #[cfg(not(feature = "dictum"))]
+    let policy_hash_override: Option<String> = None;
+
+    let receipts = try_build_receipt_logger(db_url, policy_hash_override).await;
     require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
-    #[cfg(feature = "dictum")]
-    let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> = None;
 
     let state = Arc::new(AppState {
         audit_store: storage.audit_store,
@@ -2229,7 +2303,11 @@ async fn cmd_proxy(db_url: &str, agent_id: &str, command: &str, args: Vec<String
     }
 }
 
-async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
+async fn cmd_mcp_server(
+    db_url: &str,
+    seed_demo: bool,
+    #[cfg(feature = "dictum")] policy_path: Option<&str>,
+) {
     use iaga_sentinel::mcp_server::server::run_mcp_server;
 
     let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
@@ -2246,11 +2324,20 @@ async fn cmd_mcp_server(db_url: &str, seed_demo: bool) {
         webhooks::DeadLetterQueue::new(),
     )));
 
-    let receipts = try_build_receipt_logger(db_url, None).await;
+    // Load the overlay here too — sharing a database with `iaga serve` does not
+    // share its in-memory overlay, so without this the MCP verdict would ignore
+    // the operator's `--policy`. Loaded before the receipt logger so the policy
+    // hash is bound into every receipt this server signs.
+    #[cfg(feature = "dictum")]
+    let dictum_overlay = load_dictum_overlay(policy_path);
+    #[cfg(feature = "dictum")]
+    let policy_hash_override = dictum_overlay.as_ref().map(|o| o.policy_hash().to_string());
+    #[cfg(not(feature = "dictum"))]
+    let policy_hash_override: Option<String> = None;
+
+    let receipts = try_build_receipt_logger(db_url, policy_hash_override).await;
     require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
-    #[cfg(feature = "dictum")]
-    let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> = None;
 
     let state = Arc::new(AppState {
         audit_store: storage.audit_store,
@@ -2564,7 +2651,13 @@ fn cmd_kernel_status() {
 }
 
 #[cfg(feature = "kernel")]
-async fn cmd_kernel_run(db_url: &str, agent_id: &str, cwd: Option<&str>, cmd: &[String]) -> i32 {
+async fn cmd_kernel_run(
+    db_url: &str,
+    agent_id: &str,
+    cwd: Option<&str>,
+    #[cfg(feature = "dictum")] policy_path: Option<&str>,
+    cmd: &[String],
+) -> i32 {
     use iaga_sentinel::core::types::{
         ActionDetail, ActionType, GovernanceDecision, InspectRequest,
     };
@@ -2600,11 +2693,15 @@ async fn cmd_kernel_run(db_url: &str, agent_id: &str, cwd: Option<&str>, cmd: &[
     // so `iaga run` works out of the box without requiring a separate
     // `iaga migrate` + import step.
     seed_demo_data(&storage.policy_store).await;
-    let receipts = try_build_receipt_logger(db_url, None).await;
+    #[cfg(feature = "dictum")]
+    let dictum_overlay = load_dictum_overlay(policy_path);
+    #[cfg(feature = "dictum")]
+    let policy_hash_override = dictum_overlay.as_ref().map(|o| o.policy_hash().to_string());
+    #[cfg(not(feature = "dictum"))]
+    let policy_hash_override: Option<String> = None;
+    let receipts = try_build_receipt_logger(db_url, policy_hash_override).await;
     require_receipts_or_exit(&receipts);
     let reasoning = try_build_reasoning_engine();
-    #[cfg(feature = "dictum")]
-    let dictum_overlay: Option<Arc<iaga_sentinel::pipeline::dictum_overlay::DictumOverlay>> = None;
     let event_bus = EventBus::new(16);
     let webhook_manager = Arc::new(WebhookManager::new(Arc::new(
         webhooks::DeadLetterQueue::new(),

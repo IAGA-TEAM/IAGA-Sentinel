@@ -19,6 +19,60 @@ early-access list.
 
 ---
 
+## [2.0.0], 2026-07-24 — Fully Autonomous Agentic Usage and Setup
+
+IAGA Sentinel can now be **stood up by an AI agent on its own**, from a clean checkout, with the policy
+the agent authors **actually enforced on the calls the agent makes over MCP**. This release closes the
+gap between "the agent connected" and "the agent is governed".
+
+The central fix: `iaga mcp-server` (and `proxy`, `run`) built their state with **no policy overlay**, so
+an agent's `.dictum` rules governed only actions a human sent over HTTP — never the ones the agent itself
+made over MCP. Those calls appeared in the dashboard, but the verdict ignored the policy. They now take
+`--policy`, exactly like `serve`; point both at the same file and the policy governs the MCP path too.
+Because MCP verdicts now include the overlay (and its `policy_hash` is bound into the receipts those
+surfaces sign), this is a major version bump.
+
+### Added
+
+- **`--policy <file>` on `mcp-server`, `proxy`, and `run`.** Each loads the Dictum overlay the same way
+  `serve` does and binds its `policy_hash` into every receipt it signs. An agent's authored policy now
+  governs the actions it takes over MCP, not just the ones typed into the HTTP API.
+- **A `filesystem.write` MCP tool schema.** `file_write` over MCP was previously rejected as "no schema
+  registered" and force-blocked regardless of policy; it is now validated (`path` + `content`) and
+  governed normally.
+- **Human-in-the-loop autonomous standing procedure in [`AGENTS.md`](AGENTS.md).** An agent derives its
+  rules from its own memory/instruction files, shows them for approval (gate 1), brings the system up,
+  makes two live test calls the user watches land on the dashboard (gate 2), then greets them.
+- **`scripts/agent_bootstrap.ps1` / `scripts/agent_bootstrap.sh`** — one command runs the whole
+  mechanical loop non-interactively (build → policy → serve → self-connect over MCP → two governed test
+  calls → offline proof) and asserts the overlay is in force.
+- **"Fully Autonomous Agentic Usage and Setup"** section in the README.
+
+### Changed
+
+- **Default service mode is now `sidecar`, not `gateway`.** `/health` reported `gateway` by default,
+  contradicting the product's advisory-sidecar positioning. Set `IAGA_SENTINEL_DEFAULT_MODE=gateway` to
+  opt back into the old label.
+- **The MCP `intent` payload field is advisory.** A missing or short `intent` used to fail schema
+  validation and force a `block`, silently escalating benign `allow` actions (e.g. a plain
+  `filesystem.read`) over the MCP path. `intent` is now recommended-but-optional and never blocks on its
+  own; structural fields (`path`, `command`, `method`+`destination`, `content`) still do.
+- **The Dictum lexer tolerates a leading UTF-8 BOM**, so a `.dictum` saved by an editor (or PowerShell
+  `Set-Content -Encoding utf8`) no longer fails to parse with `unexpected character` at 1:1.
+
+### Fixed
+
+- MCP `iaga.inspect` verdicts ignored a loaded policy overlay (the overlay lived only in the `serve`
+  process). Verified: an identical `filesystem.read` returns `allow` with no overlay and `review` with
+  the overlay loaded, attributed as `dictum[<policy>]` in `auditEvent.reasons`.
+- Benign, well-formed MCP actions were force-blocked when they omitted `intent`.
+
+Receipt bytes for the HTTP `serve` path and the wire contract are unchanged; existing receipts verify
+unchanged. Receipts signed by `mcp-server` / `proxy` / `run` now carry the overlay's `policy_hash` when a
+`--policy` is loaded (previously always absent).
+
+---
+
 ## [1.9.2], 2026-07-23
 
 Fixes a way to accidentally deny **all** traffic. A Dictum overlay policy that

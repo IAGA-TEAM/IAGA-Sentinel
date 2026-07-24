@@ -99,5 +99,10 @@ crates/iaga-sentinel-core/*.sqlite
 # Demo recording kit: the exported receipt chain is regenerated every run.
 chain.json
 
+# Agent self-bootstrap artifacts (scripts/agent_bootstrap.*): the policy file and
+# shared DB are regenerated on every run.
+agent_rules.dictum
+iaga_shared.db
+
 # Local-only audit report (senior read-only review). Never committed.
 /AUDIT.md

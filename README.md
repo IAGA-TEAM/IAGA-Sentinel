@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/badge-version.svg" alt="version 1.9.2" />
+  <img src="docs/media/badge-version.svg" alt="version 2.0.0" />
   <img src="docs/media/badge-license.svg" alt="license BUSL-1.1" />
   <img src="docs/media/badge-aiact.svg" alt="Supports EU AI Act Article 12 record-keeping" />
   <img src="docs/media/badge-rust.svg" alt="Rust stable" />
@@ -24,6 +24,7 @@
 <p align="center">
   <a href="https://www.iaga.tech/docs"><strong>Documentation</strong></a> ·
   <a href="#quickstart">Quickstart</a> ·
+  <a href="#fully-autonomous-agentic-usage-and-setup">Autonomous agent setup</a> ·
   <a href="#community-vs-enterprise">Community vs Enterprise</a> ·
   <a href="#who-we-are">Who we are</a> ·
   <a href="#license">License</a>
@@ -80,7 +81,7 @@ curl -s -X POST http://localhost:4010/v1/inspect -H 'Content-Type: application/j
 The receipt chain verifies with no server, no database and no network, using the standalone `iaga-verify` binary. That binary isn't in the Docker image, so install the CLI (still no clone) and run the same flow locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v1.9.2 --locked \
+cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v2.0.0 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo     # then POST /v1/inspect as above
 ```
@@ -95,7 +96,37 @@ Postgres (`--features postgres` + `DATABASE_URL`) and `docker compose up -d` are
 
 ---
 
-## Test me now (1.9.2)
+## Fully Autonomous Agentic Usage and Setup
+
+IAGA Sentinel is built to be **stood up by an AI agent itself** — no human runbook required. Drop this
+repo into an agentic coding tool (Claude Code, Cursor, OpenClaw, or any MCP client) and point it at
+[`AGENTS.md`](AGENTS.md): the agent reads its own memory/instruction files, derives the operating rules
+it already carries, encodes them as a typed **Dictum** policy, and — once you approve them — brings up
+the dashboard, connects itself over **MCP**, and puts its own actions under governance. Every tool call
+it then makes is checked (allow / review / block) and sealed into a signed receipt *before* it acts.
+
+The loop is human-in-the-loop by design — two gates:
+
+1. **You approve the rules.** The agent derives them from its memory, shows them in plain language (each
+   citing its source), and waits. Nothing is enforced until you say *go*.
+2. **You watch it work.** It makes two live test calls; you watch them land on the dashboard at
+   <http://localhost:4010/> in real time, and once you confirm, it greets you.
+
+One command runs the whole mechanical loop non-interactively — build → policy → serve → self-connect
+over MCP → two governed test calls → offline proof:
+
+```bash
+./scripts/agent_bootstrap.sh          # Linux/macOS (needs jq)
+.\scripts\agent_bootstrap.ps1         # Windows
+```
+
+The detail that makes it real: the agent passes the **same `--policy` to both `iaga serve` and
+`iaga mcp-server`**, so the policy it authored actually governs the calls it makes over MCP — not only
+the ones a human types. Full standing procedure: [`AGENTS.md`](AGENTS.md).
+
+---
+
+## Test me now (2.0.0)
 
 Do not take our word for it. The repository ships a self-contained demo kit that drives three real verdicts through the live pipeline and proves the receipt offline, on your own machine. Nothing is faked, and you get the same verdicts every run (the verdicts are stable; the exact risk integers drift slightly with agent trust, which the pipeline updates after each action). Two scripts under [`scripts/`](scripts/) and a runbook in [`docs/demo/README.md`](docs/demo/README.md). The primary path is Windows PowerShell; Linux and macOS use the `.sh` twins.
 

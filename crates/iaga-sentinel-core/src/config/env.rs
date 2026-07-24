@@ -87,6 +87,18 @@ fn parse_origin_list(raw: Option<String>) -> Option<Vec<String>> {
     }
 }
 
+/// Resolve `IAGA_SENTINEL_DEFAULT_MODE` into a [`ServiceMode`]. Defaults to
+/// `Sidecar`: IAGA Sentinel is an advisory governance + evidence sidecar, not a
+/// network gateway (see positioning / ARCHITECTURE). Reporting `gateway` on
+/// `/health` by default mislabeled the product; opt into gateway framing
+/// explicitly with `IAGA_SENTINEL_DEFAULT_MODE=gateway`.
+fn parse_service_mode(raw: Option<String>) -> ServiceMode {
+    match raw.as_deref().map(str::trim) {
+        Some("gateway") => ServiceMode::Gateway,
+        _ => ServiceMode::Sidecar,
+    }
+}
+
 pub fn load_env() -> AppEnv {
     let port = env::var("PORT")
         .ok()
@@ -105,13 +117,7 @@ pub fn load_env() -> AppEnv {
         _ => NodeEnv::Development,
     };
 
-    let default_mode = match env::var("IAGA_SENTINEL_DEFAULT_MODE")
-        .unwrap_or_default()
-        .as_str()
-    {
-        "sidecar" => ServiceMode::Sidecar,
-        _ => ServiceMode::Gateway,
-    };
+    let default_mode = parse_service_mode(env::var("IAGA_SENTINEL_DEFAULT_MODE").ok());
 
     let cors_origins = parse_origin_list(env::var("IAGA_SENTINEL_CORS_ORIGINS").ok());
 
@@ -170,6 +176,21 @@ mod tests {
         assert_eq!(parse_or::<u64>(Some("nope".into()), 42), 42);
         assert_eq!(parse_or::<u64>(Some("7".into()), 42), 7);
         assert_eq!(parse_or::<u64>(Some(" 7 ".into()), 42), 7);
+    }
+
+    #[test]
+    fn service_mode_defaults_to_sidecar() {
+        // Unset / empty / unknown all default to Sidecar (not Gateway).
+        assert_eq!(parse_service_mode(None), ServiceMode::Sidecar);
+        assert_eq!(parse_service_mode(Some("".into())), ServiceMode::Sidecar);
+        assert_eq!(parse_service_mode(Some("proxy".into())), ServiceMode::Sidecar);
+        assert_eq!(parse_service_mode(Some("sidecar".into())), ServiceMode::Sidecar);
+        // Only the explicit opt-in selects Gateway.
+        assert_eq!(parse_service_mode(Some("gateway".into())), ServiceMode::Gateway);
+        assert_eq!(
+            parse_service_mode(Some("  gateway  ".into())),
+            ServiceMode::Gateway
+        );
     }
 
     #[test]
