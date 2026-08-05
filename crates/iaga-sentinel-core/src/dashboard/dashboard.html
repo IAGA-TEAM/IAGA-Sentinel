@@ -742,7 +742,7 @@ function renderReceipts(){
   const runs=rc.runs||[];
   rbox.innerHTML=`<h3>Signed receipts</h3><div class="kv"><div class="row"><span class="k">Signer key</span><span class="v mono">${esc(rc.signerKeyId||'—')}</span></div><div class="row"><span class="k">Policy hash</span><span class="v mono">${esc((rc.policyHash||'').slice(0,32))||'—'}</span></div></div>
     <div class="table-wrap section-gap" style="border:0"><table><thead><tr><th>Run</th><th>Verdict</th><th class="num">Receipts</th><th>Last</th></tr></thead>
-    <tbody>${runs.length?runs.slice(0,40).map(r=>`<tr><td class="id">${esc(String(pick(r,'runId','run_id')||'').slice(0,16))}</td><td>${badge(pick(r,'terminalVerdict','verdict','terminal_verdict'))}</td><td class="num">${num(pick(r,'receiptCount','receipt_count','count'))}</td><td class="id">${esc(String(pick(r,'lastTimestamp','last_timestamp','timestamp')||'').slice(0,19))}</td></tr>`).join(''):`<tr><td colspan="4"><div class="empty">No signed runs yet.</div></td></tr>`}</tbody></table></div>`;
+    <tbody>${runs.length?runs.slice(0,40).map(r=>`<tr><td class="id" title="${esc(String(pick(r,'runId','run_id')||''))}">${esc(String(pick(r,'runId','run_id')||''))}</td><td>${badge(pick(r,'terminalVerdict','verdict','terminal_verdict'))}</td><td class="num">${num(pick(r,'receiptCount','receipt_count','count'))}</td><td class="id">${esc(String(pick(r,'lastTimestamp','last_timestamp','timestamp')||'').slice(0,19))}</td></tr>`).join(''):`<tr><td colspan="4"><div class="empty">No signed runs yet.</div></td></tr>`}</tbody></table></div>`;
 }
 function renderTelemetry(){
   const metrics=state.data.metrics||[],spans=state.data.spans||[];

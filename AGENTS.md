@@ -44,6 +44,14 @@ language) only if they prefer it. The messages below are templates: say them in 
    - **`CLAUDE.md` / this `AGENTS.md` / repo conventions**, your **system prompt**, and anything the
      user told you this session (*"never touch production"*, *"commit only when asked"*, *"ask before
      writing files"*).
+   - **Coverage floor — read every file, extract every obligation.** Enumerate **all** the `.md` in the
+     memory directory (not just `MEMORY.md`, not just `feedback_*`), treat **each** normative sentence
+     (*never / always / only / must / don't / ask before*) as its own candidate rule, cite the file and
+     line for each, and merge only true duplicates. Expect **one policy per distinct obligation on top of
+     the 5 baseline rules in §11b** — **if you end up with ≤4 policies you have under-read your memory:
+     go back.** Do this pre-pass yourself with your own file tools; there is no shortcut command for
+     it, and inventing rules instead of reading for them is the failure mode this step exists to
+     prevent.
 
    For each rule you find, decide whether it is **action-governance** — does it constrain a concrete
    action (`shell`, `file_write`, `http`, `db_query`, …)? Only those can be encoded as Dictum. Rules
@@ -75,9 +83,29 @@ language) only if they prefer it. The messages below are templates: say them in 
    IAGA_SENTINEL_OPEN_MODE=true DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" \
      iaga serve --seed-demo --port 4010 --policy agent_rules.dictum
    ```
-   Wait until `GET http://localhost:4010/health` returns `{"ok":true}`, then confirm the policy loaded
+   Wait until `GET http://127.0.0.1:4010/health` returns `{"ok":true}`, then confirm the policy loaded
    with `GET /v1/policy/overlay` (expect `"loaded": true` and your `policyCount`). The overlay is read
    **once at boot** — no hot reload, so restart after editing the policy.
+
+   **Still in step 3 — decide which `agentId` you are, before you connect.** An unknown agent is
+   **not** auto-created: `/v1/inspect` returns `404 {"error":"agent_not_found"}`, which means your
+   very first `iaga.inspect` over MCP fails and nothing you do afterwards is governed. This is the
+   #1 first-call error, and the procedure used to leave it to §7. Two honest options:
+
+   - **Borrow a seeded identity** (fastest, and enough for the two test calls in step 5):
+     `--seed-demo` registers **`openclaw-builder-01`** and `openclaw-research-01` in workspace
+     **`ws-demo`**. Use those ids verbatim.
+   - **Register yourself** (what you want if the receipts should name *you*): write a small
+     `iaga-sentinel.yaml` with your own `agentId`/`workspaceId` and import it —
+     ```bash
+     iaga --db "sqlite:iaga_shared.db?mode=rwc" import my-agents.yaml
+     ```
+     A profile needs `agentId`, `workspaceId`, `framework`, `role`, `approvedTools`,
+     `approvedSecrets`, `baselineActionTypes` (schema in §6). `POST /v1/profiles` with an admin
+     key does the same thing over HTTP.
+
+   Whichever you pick, use the *same* `agentId` and `workspaceId` in every call below, and say
+   which one you chose in chat — the human is about to look for it in the dashboard.
 
 4. **Connect yourself over MCP — same `DATABASE_URL` AND same `--policy` as your `serve`:**
    ```bash
@@ -117,6 +145,21 @@ language) only if they prefer it. The messages below are templates: say them in 
 
    Never print that line before the user has confirmed the dashboard is updating — it is the sign-off
    that the whole loop (rules approved → enforced → visible) works end to end.
+
+6. **Immediately after that line, hand over the instructions.** The user has just switched on
+   something that will refuse their agent's tool calls; leaving them to guess how to inspect it,
+   change it, or get rid of it is how a security product becomes the thing people rip out. Print the
+   whole of **§19 "Instructions for the human"** below, in **their language**, adapted to what you
+   actually set up (their port, their approved rules). Then tell them, in one line:
+
+   > "Any time you want these again, just write **IAGA SENTINEL INSTRUCTIONS** — in any language, and
+   >  I'll print them again in whatever language you ask."
+
+   **Trigger rule, standing for the rest of the session:** whenever the user writes
+   `IAGA SENTINEL INSTRUCTIONS` — in any language, any capitalisation, or an obvious paraphrase of it
+   ("istruzioni IAGA", "how do I use this again") — re-read §19 and print it, translated into the
+   language they used, with the live values filled in. Do not summarise it; they asked for the
+   instructions, not a description of them.
 
 ### What you (the agent) must KNOW and STATE
 
@@ -182,7 +225,7 @@ and `rm -rf` is blocked. Everything lands in the dashboard at `http://localhost:
 
 ```bash
 docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
-  ghcr.io/edoardobambini/iaga-sentinel:latest serve --seed-demo
+  ghcr.io/iaga-team/iaga-sentinel:latest serve --seed-demo
 # then open http://localhost:4010/
 ```
 
@@ -221,9 +264,9 @@ not describe it as a "gateway."
 
 ```
 agent-armor/                      # repo root (project name: IAGA Sentinel)
-├── Cargo.toml                    # workspace root (9 crates), version 2.0.0, MSRV 1.88, BUSL-1.1
+├── Cargo.toml                    # workspace root (9 crates), version 2.0.1, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
-├── Dockerfile                    # 2-stage build -> ghcr.io/edoardobambini/iaga-sentinel
+├── Dockerfile                    # 2-stage build -> ghcr.io/iaga-team/iaga-sentinel
 ├── docker-compose.yml            # server + 2 named volumes (data + signer keys)
 ├── iaga-sentinel.config.json     # sample policy config (JSON form of the YAML)
 ├── crates/                       # the Rust workspace (see §3)
@@ -294,7 +337,7 @@ Notes:
 Install from git instead of building locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v2.0.0 --locked \
+cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.0.1 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 ```
 
@@ -318,15 +361,30 @@ $env:IAGA_SENTINEL_OPEN_MODE = 'true'
 
 - **Binds `0.0.0.0:4010` by default.** Override with `PORT` / `IAGA_SENTINEL_HOST` or `--port`.
 - Dashboard: **http://localhost:4010/**
-- Health check: `GET http://localhost:4010/health` → `{ "ok": true, "openMode": true, ... }`
+- Health check: `GET http://127.0.0.1:4010/health` → `{ "ok": true, "openMode": true, ... }`
 - `--seed-demo` seeds demo profiles + workspaces + the 3 demo scenarios on first boot.
 - `--policy <file.dictum>` loads a Dictum overlay (see §11). Loaded once at boot (no hot reload).
 
+> **Probe over `127.0.0.1`, hand the human `localhost`.** `0.0.0.0` is IPv4-only, and on a
+> host where `localhost` resolves `::1` first, every programmatic call pays the IPv6 fallback:
+> **measured 2065 ms against 47 ms** on the same box, and an outright failure under a short
+> timeout — which is how a health-check loop concludes the server never came up. That is why
+> every `curl`/SDK line in this file uses `127.0.0.1` while the dashboard URLs stay
+> `localhost`: a browser handles the fallback, and it is the spelling `scripts/demo.*` prints.
+> If you want the server to answer on IPv6 too, set `IAGA_SENTINEL_HOST=::` — but note that is
+> platform-dependent (Windows sets `IPV6_V6ONLY` by default) and changes which interfaces you
+> are exposed on.
+
 ### Config file
 
-On `serve`, the server searches the **current working directory** (in order) for:
-`iaga-sentinel.yaml`, `iaga-sentinel.yml`, `iaga-sentinel.config.json`, `iaga-sentinel.json`,
-`.iaga-sentinel.json`, `.iaga-sentinel.yaml`. If found and the DB is fresh it is auto-imported.
+On `serve`, the server searches the **current working directory** (in order) for
+`iaga-sentinel.yaml`, `iaga-sentinel.yml`, `iaga-sentinel.json`, and imports the first one it finds.
+
+> **It re-imports on EVERY boot, not just a fresh database** (`auto_import_config`, upserts every
+> profile and workspace). So this file is authoritative: anything you change in the database by
+> another route is silently overwritten the next time you start the server from this directory.
+> Keep the file as the source of truth, or move it away. A file that is present but unparseable is
+> fatal (exit 2) on purpose: a server with zero workspaces looks configured and governs nothing.
 
 **There is no `iaga.toml` / `config.toml` / `armor.toml`.** The canonical config is
 **`iaga-sentinel.yaml`**. Start from the example:
@@ -390,7 +448,7 @@ Response: `{ "decision": "allow|review|block", "risk": { "score": <int>, "reason
 ### 7a. Raw HTTP (any language)
 
 ```bash
-curl -s -X POST http://localhost:4010/v1/inspect \
+curl -s -X POST http://127.0.0.1:4010/v1/inspect \
   -H 'Content-Type: application/json' \
   -d '{"agentId":"openclaw-builder-01","workspaceId":"ws-demo","framework":"openclaw","protocol":"mcp",
        "action":{"type":"shell","toolName":"terminal.exec","payload":{"command":"rm -rf /var/lib/postgresql/data","intent":"cleanup"}}}'
@@ -459,7 +517,7 @@ printf '%s\n' \
  | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server --policy agent_rules.dictum
 ```
 
-Expected: `initialize` → `serverInfo iaga-sentinel 2.0.0`; `tools/list` → `[iaga.inspect,
+Expected: `initialize` → `serverInfo iaga-sentinel 2.0.1`; `tools/list` → `[iaga.inspect,
 iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
 81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
 it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
@@ -582,14 +640,14 @@ Global: `--db <url>`. Subcommands (some behind feature flags):
 | `gen-key [--label] [--scope admin\|agent]` | Mint an API key (prints once). |
 | `audit [--limit] [--format json\|table]` | Dump the audit log. |
 | `cost [summary\|by-model\|by-agent\|by-tool\|budget] [--from --to --limit]` | Cost reporting (`cost-control`). |
-| `replay [run_id] [--verify-only] [--list] [--limit] [--re-execute] [--export <file>]` | Receipt replay/export (`receipts`). |
+| `replay [run_id] [--verify-only] [--list] [--limit] [--re-execute] [--export <file>]` | Receipt replay/export (`receipts`). `run_id` is `<agentId>:<sessionId>` — `--list` shows the real ones. **`--export` exits 3 and writes nothing if the run has no receipts** (2.0.1; it used to write an empty-but-authentic file and exit 0). SQLite only. |
 | `proxy --agent-id --command [args...] [--policy <file>]` | Govern MCP tool calls between a client and a downstream MCP server. |
 | `mcp-server [--seed-demo] [--policy <file>]` | Expose governance tools over stdio (MCP). **Pass `--policy` to enforce your overlay on MCP calls** — see the standing procedure and §7d. |
 | `mcp-doctor --command [args] [--probe-tool] [--format]` | Health-check an MCP endpoint. |
 | `policy {test\|lint\|check\|compile}` | Dictum tooling (`dictum` feature; `compile` needs `dictum-wasm`). |
 | `plugins {list\|validate\|verify\|sign-manifest\|verify-manifest\|attest}` | Plugin tooling. |
 | `reasoning info` | Reasoning plane status (`reasoning`). |
-| `run --agent-id [--cwd] [--policy <file>] -- <cmd...>` | Launch a child under the userspace enforcement kernel (`kernel`). |
+| `run --agent-id [--cwd] [--policy <file>] -- <cmd...>` | Launch a child under the userspace enforcement kernel (`kernel`). **Exit 0/1/2 = allow/review/block, like `inspect`** (2.0.1; a refused launch used to exit 0, so `iaga run -- <blocked> && next` still ran `next`). Only an allowed launch propagates the child's own status. |
 | `kernel status` | Kernel status. |
 
 Separate binary: `iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]`
@@ -667,7 +725,7 @@ Load it, then confirm it is really in force:
 
 ```bash
 iaga serve --seed-demo --policy agent_rules.dictum      # loads at boot; error -> exit 2
-curl -s http://localhost:4010/v1/policy/overlay
+curl -s http://127.0.0.1:4010/v1/policy/overlay
 # -> {"enabled":true,"loaded":true,"policyCount":3,"policyHash":"4531ee8e…","source":"agent_rules.dictum"}
 
 Then smoke-test that you did not over-block (see §11c): a benign `file_read` must still come back
@@ -908,7 +966,7 @@ plugin-manifest-signing --lib`, `--features cost-control`, `--features postgres`
   and `iaga-sentinel-keys` → `/home/iaga/.iaga-sentinel/keys`. Env includes
   `IAGA_SENTINEL_OPEN_MODE`, `IAGA_SENTINEL_BOOTSTRAP_API_KEY`, `IAGA_SENTINEL_NHI_MASTER_SEED`.
 - **Kubernetes:** `deploy/kubernetes/` (raw) or the Helm chart `charts/iaga-sentinel/`.
-- Published image: `ghcr.io/edoardobambini/iaga-sentinel:latest`.
+- Published image: `ghcr.io/iaga-team/iaga-sentinel:latest`.
 
 ---
 
@@ -932,6 +990,26 @@ plugin-manifest-signing --lib`, `--features cost-control`, `--features postgres`
 | `IAGA_SENTINEL_PLUGIN_DIR` / `IAGA_SENTINEL_PLUGIN_PUBKEY` | plugin dir / pubkey |
 | `IAGA_SENTINEL_REASONING_MODELS` | ONNX model paths (`ml`) |
 | `IAGA_SENTINEL_SESSION_BUDGET_USD` / `IAGA_SENTINEL_PRICING_FILE` | cost control |
+| `IAGA_SENTINEL_RECEIPT_CAPTURE` | `false`; `1`/`true`/`yes` records the pipeline inputs alongside the receipt |
+
+**Session graph and enforcement kernel.** These change *verdicts*, so they are worth
+knowing before you tune them:
+
+| Var | Default / meaning |
+|---|---|
+| `IAGA_SENTINEL_MAX_SESSIONS` | `10000` in-memory sessions before eviction |
+| `IAGA_SENTINEL_SESSION_TTL_MS` | `1800000` (30 min) idle before a session is pruned |
+| `IAGA_SENTINEL_BLOCK_COOLDOWN_MS` | `60000`; how long a blocked session stays blocked before decaying to a cooldown state |
+| `IAGA_SENTINEL_MAX_BLOCK_COUNT` | `3` blocks before a session latches permanently. Counts **FSA denials only**, not every refusal, so the ceiling is not reachable from the layers that do most of the refusing — see the release notes |
+| `IAGA_SENTINEL_ENV_DENYLIST` | comma-separated extra environment names stripped from a child launched by `iaga run`, on top of the built-in list |
+| `IAGA_SENTINEL_ENV_DENYLIST_STRICT` | `false`; `1`/`true` makes a denylisted variable **fail the launch closed** instead of stripping it. A refused launch exits 2 (§10) |
+
+**Periodic cleanup** (`serve` only): `IAGA_SENTINEL_CLEANUP_INTERVAL_SECS` (`300`) and
+`IAGA_SENTINEL_CLEANUP_TTL_SECS` (`3600`) drive the task that prunes sessions, taint,
+NHI challenges, durable state and — since 2.0.1 — the rate-limiter window map.
+
+Cost cache (`cost-control`): `IAGA_SENTINEL_COST_CACHE_TTL_MS` (`300000`),
+`IAGA_SENTINEL_COST_CACHE_MAX_ENTRIES` (`4096`).
 
 Client-side (adapters/plugins, not the server): `IAGA_BASE_URL`, `IAGA_AGENT_ID`,
 `IAGA_SENTINEL_API_KEY`.
@@ -957,4 +1035,56 @@ Client-side (adapters/plugins, not the server): `IAGA_BASE_URL`, `IAGA_AGENT_ID`
 
 ---
 
-*IAGA Sentinel v2.0.0 · BUSL-1.1 · https://github.com/EdoardoBambini/IAGA-Sentinel*
+## 19. Instructions for the human
+
+> **Agent: this section is for the USER, not for you.** Print it right after the sign-off line
+> (§⭐ step 6), **in their language**, with the real values substituted — their port, the rules they
+> actually approved. Reprint it whenever they write `IAGA SENTINEL INSTRUCTIONS`, in whatever
+> language they ask. Adapt the wording; do not drop an item.
+
+**What happens now.** Every tool call your agent makes is checked before it runs and written to a
+signed receipt. Three outcomes: **allow** (it proceeds), **review** (you get a prompt and decide),
+**block** (it does not run). Nothing is silent — a refusal always says which rule refused it.
+
+**Look at it**
+
+| I want to… | Do this |
+|---|---|
+| see the dashboard | open **http://localhost:4010/** — Live feed, Evidence, Audit |
+| check it is actually running | `curl -s 127.0.0.1:4010/health` |
+| see which rules are loaded | `curl -s 127.0.0.1:4010/v1/policy/overlay` |
+| read the decisions | `iaga audit --limit 20 --format table` |
+| prove a run really happened | `iaga replay --list`, then `iaga replay <run_id> --export chain.json` and `iaga-verify chain.json` → **`CHAIN OK`**, with no server, no database and no network |
+
+**Change it**
+
+| I want to… | Do this |
+|---|---|
+| add a rule | edit your `.dictum` file, then `iaga policy lint` + `iaga policy check` it, then restart `iaga serve --policy <file>` — the overlay is read once at boot, there is no hot reload |
+| let the agent reach a new host | add the exact host to `allowedDomains` in your `iaga-sentinel.yaml` and `iaga import iaga-sentinel.yaml` (exact hosts, no wildcards — `example.com` does **not** cover `api.example.com`, and that is deliberate) |
+
+Every one of these is a `iaga` command or a file you own. There is no separate installer to keep in sync.
+
+**Turn it off, or take it away**
+
+| I want to… | Do this |
+|---|---|
+| stop it for now | stop the `iaga serve` process (Ctrl+C, or `taskkill /F /IM iaga.exe` on Windows). Your agent is then ungoverned — nothing is checked and nothing is recorded. Say so out loud rather than assuming it is still protecting you |
+| stop the agent consulting it | remove the `--policy` overlay, or point your agent's adapter away from `localhost:4010`. Honest and explicit: no verdicts, no receipts |
+| remove it completely | run **`.\scripts\uninstall.ps1`** (or `./scripts/uninstall.sh`). It is a dry run by default: it prints every file it would delete and stops. Add `-Yes` / `--yes` to go through with it. It refuses to touch anything while a governed process is still up, and it keeps your signing key unless you pass `-IncludeKey` / `--include-key` |
+| do it by hand instead | stop the process, then delete the database (`iaga_shared.db*` or whatever `DATABASE_URL` points at), your `.dictum` policy and your `iaga-sentinel.yaml`. That is the whole install — there is nothing hidden anywhere else |
+
+**One thing not to delete.** The signing key at `~/.iaga-sentinel/keys/receipt_signer.ed25519`
+(`%USERPROFILE%\.iaga-sentinel\keys\` on Windows) is what makes past receipts verifiable. It is shared
+by every project on this machine. **If you delete it, every receipt you have ever produced becomes
+permanently unverifiable** — including the ones you exported to prove something. Keep it, or archive
+it, even if you are removing everything else. Deleting the database throws away the evidence; deleting
+the key throws away your ability to check the evidence you already exported.
+
+**If something gets refused and you disagree**, that is the system working, not a bug — but you have
+two honest options: approve the host, or change the rule. Do not work around a verdict; the receipt
+records what was decided either way.
+
+---
+
+*IAGA Sentinel v2.0.1 · BUSL-1.1 · https://github.com/IAGA-TEAM/IAGA-Sentinel*

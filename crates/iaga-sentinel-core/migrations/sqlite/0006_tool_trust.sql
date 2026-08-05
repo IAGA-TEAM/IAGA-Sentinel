@@ -1,0 +1,23 @@
+-- 2.0.1 audit: persist AgentProfile.tool_trust.
+--
+-- The field has existed on `AgentProfile` since the first commit. It is parsed
+-- from YAML, validated, accepted by the API and echoed back by it, and the
+-- scorer reads it: `execute_pipeline.rs` passes `profile.tool_trust` into
+-- `reputation_risk`, which raises the score and pushes the reason
+-- "low tool trust: X" below 0.2.
+--
+-- What was missing was the column. Both row mappers hydrated a literal 0.7, so
+-- the configured value never survived a round trip through storage. Measured
+-- before this migration: an agent configured `toolTrust: 0.05` and an agent
+-- with no setting at all produced the IDENTICAL reputation signal
+-- (score 28, "moderate trust: 0.60"), and `GET /v1/profiles/{id}` reported
+-- 0.7 for the agent configured at 0.05 — a silent policy loss with a
+-- read-back that confirmed the wrong value.
+--
+-- 0.7 is the same default the serde attribute uses (`default_tool_trust`), so
+-- every existing row keeps exactly the trust it is being scored with today and
+-- no verdict, score or signed receipt moves on upgrade. Only a profile that
+-- explicitly sets a different value changes behaviour — which is the entire
+-- point, and which is a change to signed content for those profiles.
+
+ALTER TABLE agent_profiles ADD COLUMN tool_trust REAL NOT NULL DEFAULT 0.7;

@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/badge-version.svg" alt="version 2.0.0" />
+  <img src="docs/media/badge-version.svg" alt="version 2.0.1" />
   <img src="docs/media/badge-license.svg" alt="license BUSL-1.1" />
   <img src="docs/media/badge-aiact.svg" alt="Supports EU AI Act Article 12 record-keeping" />
   <img src="docs/media/badge-rust.svg" alt="Rust stable" />
@@ -23,6 +23,7 @@
 
 <p align="center">
   <a href="https://www.iaga.tech/docs"><strong>Documentation</strong></a> ·
+  <a href="#setup-in-one-prompt"><strong>Setup in one prompt</strong></a> ·
   <a href="#quickstart">Quickstart</a> ·
   <a href="#fully-autonomous-agentic-usage-and-setup">Autonomous agent setup</a> ·
   <a href="#community-vs-enterprise">Community vs Enterprise</a> ·
@@ -32,6 +33,45 @@
 
 <p align="center">
   Built in the EU by <a href="https://www.iaga.tech/team">three founders</a> (French, German, Italian) and <a href="https://www.iaga.tech/research">research-validated, not marketing-validated</a>: peer-reviewed at AISEC 2026, Marrakech.
+</p>
+
+---
+
+<h2 align="center">Setup in one prompt</h2>
+
+<p align="center">
+  Paste this to your coding agent. It reads <a href="AGENTS.md">AGENTS.md</a> and does the rest —
+  builds the binary, derives your rules, asks you to approve them, starts the server, connects
+  itself over MCP, and makes two live calls you watch land in the dashboard.
+</p>
+
+```text
+copy the repo here https://github.com/IAGA-TEAM/IAGA-Sentinel and follow the AGENTS.MD STEP BY STEP
+```
+
+<p align="center">
+  <sub>It stops and waits for you twice: once to approve the rules it will enforce, once to confirm you can see the calls.</sub>
+</p>
+
+<h3 align="center">…and out in one command</h3>
+
+<p align="center">
+  Getting out is as easy as getting in, and it shows you what it will do before it does it.
+</p>
+
+```powershell
+.\scripts\uninstall.ps1          # dry run: lists exactly what it would remove
+.\scripts\uninstall.ps1 -Yes     # remove the install
+```
+
+<p align="center">
+  <sub>
+    The <code>.sh</code> twin takes <code>--yes</code>. It refuses to run while a governed process
+    is still up, and it <strong>keeps your signing key</strong> unless you explicitly ask otherwise —
+    delete that and every receipt you have ever exported becomes permanently unverifiable.
+    There is no account to close, no daemon left behind, and no telemetry: the whole install is
+    a database, a policy file and a key you own.
+  </sub>
 </p>
 
 ---
@@ -63,7 +103,7 @@ Fastest look, no clone and no Rust toolchain. Pull the published image and run i
 
 ```bash
 docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
-  ghcr.io/edoardobambini/iaga-sentinel:latest serve --seed-demo
+  ghcr.io/iaga-team/iaga-sentinel:latest serve --seed-demo
 ```
 
 The operator dashboard is at <http://localhost:4010/>. Send it an agent action and it decides, scores the risk, and mints a signed receipt:
@@ -81,7 +121,7 @@ curl -s -X POST http://localhost:4010/v1/inspect -H 'Content-Type: application/j
 The receipt chain verifies with no server, no database and no network, using the standalone `iaga-verify` binary. That binary isn't in the Docker image, so install the CLI (still no clone) and run the same flow locally:
 
 ```bash
-cargo install --git https://github.com/EdoardoBambini/IAGA-Sentinel --tag v2.0.0 --locked \
+cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.0.1 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo     # then POST /v1/inspect as above
 ```
@@ -126,7 +166,7 @@ the ones a human types. Full standing procedure: [`AGENTS.md`](AGENTS.md).
 
 ---
 
-## Test me now (2.0.0)
+## Test me now (2.0.1)
 
 Do not take our word for it. The repository ships a self-contained demo kit that drives three real verdicts through the live pipeline and proves the receipt offline, on your own machine. Nothing is faked, and you get the same verdicts every run (the verdicts are stable; the exact risk integers drift slightly with agent trust, which the pipeline updates after each action). Two scripts under [`scripts/`](scripts/) and a runbook in [`docs/demo/README.md`](docs/demo/README.md). The primary path is Windows PowerShell; Linux and macOS use the `.sh` twins.
 
@@ -176,9 +216,11 @@ Window layout, captions and a 75 to 100 second timing budget are in [`docs/demo/
 
 In this repository:
 
-- [`CHANGELOG.md`](CHANGELOG.md): release notes
+- [`AGENTS.md`](AGENTS.md): the complete operator and agent reference — build, run, connect an agent over HTTP or MCP, the Dictum language, the CLI, environment variables, and the gotchas
+- [`CHANGELOG.md`](CHANGELOG.md): release notes · [`docs/releases/`](docs/releases/): the longer per-release write-ups
 - [`docs/openapi.yaml`](docs/openapi.yaml): the full HTTP API specification
-- [`docs/adr/`](docs/adr/): architectural decision records
+- [`docs/adr/`](docs/adr/): architectural decision records — start at [0010](docs/adr/0010-oss-enterprise-boundary.md) for the OSS↔Enterprise boundary
+- [`charts/iaga-sentinel/README.md`](charts/iaga-sentinel/README.md): Helm deployment, image-tag pinning, and how to roll a migration back
 - [`plug-ins/`](plug-ins/): in-the-loop plugins — released ([VoltAgent](plug-ins/voltagent-plugin/), [Letta](plug-ins/letta-plugin/)) plus `*-adapter/` integrations for 15 more frameworks
 - [`sdks/`](sdks/): Python and TypeScript SDKs
 - [`SECURITY.md`](SECURITY.md) · [`DATA_HANDLING.md`](DATA_HANDLING.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md)
@@ -277,4 +319,4 @@ Source available under [**Business Source License 1.1**](LICENSE) with **Change 
 
 **No warranty, no liability.** IAGA Sentinel is provided **"AS IS"**, with no warranty and no liability for damages. It is an *advisory* layer (every receipt is stamped `is_authoritative: false`) — it does not itself enforce or guarantee anything, and **you are responsible for testing and validating it before relying on it in production**. See [DISCLAIMER.md](DISCLAIMER.md) and the *Limitation of Liability* section of the [LICENSE](LICENSE).
 
-Repository: <https://github.com/EdoardoBambini/IAGA-Sentinel> · Documentation: <https://www.iaga.tech/docs> · Contact: `info@iaga.tech`
+Repository: <https://github.com/IAGA-TEAM/IAGA-Sentinel> · Documentation: <https://www.iaga.tech/docs> · Contact: `info@iaga.tech`

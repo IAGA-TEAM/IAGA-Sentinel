@@ -26,8 +26,8 @@ letta = ["letta-client>=1.0"]
 test = ["pytest>=7", "letta-client>=1.0"]
 
 [project.urls]
-Homepage = "https://github.com/EdoardoBambini/IAGA-Sentinel"
-Documentation = "https://github.com/EdoardoBambini/IAGA-Sentinel"
+Homepage = "https://github.com/IAGA-TEAM/IAGA-Sentinel"
+Documentation = "https://github.com/IAGA-TEAM/IAGA-Sentinel"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/iaga_letta"]

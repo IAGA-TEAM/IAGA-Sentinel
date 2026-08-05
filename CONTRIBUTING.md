@@ -8,7 +8,7 @@ that strengthens those properties is welcome.
 ## Quick start
 
 ```bash
-git clone https://github.com/EdoardoBambini/IAGA-Sentinel
+git clone https://github.com/IAGA-TEAM/IAGA-Sentinel
 cd IAGA-Sentinel
 
 # Build everything
@@ -16,15 +16,33 @@ cargo build --workspace
 
 # Run the full test suite
 cargo test --workspace
+cargo test --workspace --all-features
 cargo test -p iaga-sentinel-reasoning --features ml
 
-# Lint
+# Lint (CI runs exactly this)
 cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
 The default build uses no native ML deps. To exercise the ONNX backend
 locally, add `--features ml` to `cargo build` / `cargo test` for the
 `iaga-sentinel-reasoning` crate.
+
+The Postgres tests are skipped — and still report green — unless a live
+database is reachable, so an unset variable looks like a pass. Point them at
+one to actually run them:
+
+```bash
+docker run -d --name iaga-pg -p 5432:5432 \
+  -e POSTGRES_USER=sentinel -e POSTGRES_PASSWORD=sentinel \
+  -e POSTGRES_DB=sentinel_test postgres:16
+export IAGA_SENTINEL_TEST_PG_URL="postgres://sentinel:sentinel@localhost:5432/sentinel_test"
+cargo test -p iaga-sentinel-receipts --features postgres
+```
+
+That covers the receipt store only. The core schema's Postgres migrations are
+exercised by running the binary against a `postgres://` URL — `iaga migrate
+--db postgres://…` with `--features postgres` — not by any test.
 
 ## What we accept
 
@@ -39,7 +57,7 @@ locally, add `--features ml` to `cargo build` / `cargo test` for the
 If your change introduces a new capability, alters a public trait, or
 shifts an architectural boundary, add an ADR under
 [`docs/adr/`](docs/adr/) following the numbering and template of the
-existing ones (0001-0019, 0009 is intentionally unused). Keep it
+existing ones (0001-0023; 0009 and 0022 are intentionally unused). Keep it
 short: context, decision,
 consequences, what's deliberately out of scope.
 

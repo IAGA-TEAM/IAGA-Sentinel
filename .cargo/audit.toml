@@ -21,9 +21,41 @@
 # RUSTSEC-2024-0436, paste 1.0.15 unmaintained (informational)
 #   Pulled via tract-onnx -> tract-core / tract-linalg (ml feature, reasoning
 #   plane). Ubiquitous proc-macro; no drop-in replacement available.
+#
+# RUSTSEC-2026-0217, tract-nnef 0.21.12, 6.1 medium (2.0.1 — the only entry here
+#   that is a VULNERABILITY rather than an informational warning, so it is the
+#   one to re-review first).
+#   Integer overflow in the NNEF tensor parser, out-of-bounds read *on model
+#   load*. Not a 2.0.1 regression: the advisory was published 2026-06-18 and
+#   2.0.0 shipped the same tract version, so `cargo audit` fails on `main` today
+#   as well.
+#
+#   NOT IN ANY SHIPPED ARTIFACT, measured rather than assumed:
+#     * `iaga-sentinel-reasoning`: `default = []`, `ml = ["dep:tract-onnx"]`,
+#       and `tract-onnx` is `optional = true`.
+#     * `iaga-sentinel-core`: `ml` is absent from `default`.
+#     * `Dockerfile:22` and `.github/workflows/release.yml:75` both build with
+#       default features.
+#     * `cargo tree -p iaga-sentinel-core -i tract-nnef` -> "did not match any
+#       packages". It reaches Cargo.lock, which is what cargo-audit scans, and
+#       nothing else.
+#   Reaching the vulnerable code needs `--features ml` AND an attacker-supplied
+#   NNEF/ONNX model, and no model ships in this repository.
+#
+#   WHY NOT JUST UPGRADE. The advisory's own fix (>=0.21.16) forces
+#   `tract-linalg` to pin `time` down from 0.3.47 to 0.3.41, which is affected by
+#   RUSTSEC-2026-0009 (DoS via stack exhaustion, 6.8 medium — WORSE than the 6.1
+#   this fixes), and `cargo update -p time --precise 0.3.47` is refused by
+#   `tract-linalg 0.21.17`'s own constraint. The two cannot both be satisfied
+#   inside `tract-onnx = "0.21"`. Escaping it means tract 0.23, an API-breaking
+#   change to an optional backend with no model in the tree to test against.
+#   Recorded as an accepted trade-off instead of committing a net-worse lock
+#   file, and instead of leaving CI red on a finding we have already decided
+#   about. Re-review when the reasoning plane is next touched.
 [advisories]
 ignore = [
   "RUSTSEC-2023-0071",
   "RUSTSEC-2025-0057",
   "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0217",
 ]

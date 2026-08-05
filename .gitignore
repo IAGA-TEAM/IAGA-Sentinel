@@ -6,6 +6,12 @@ dist/
 *.key
 *.pem
 *.db
+# SQLite writes sidecar files next to the database; `*.db` does not cover them,
+# so `iaga_shared.db-journal` survived a run of scripts/agent_bootstrap.* and
+# showed up as untracked.
+*.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 .DS_Store
 .claude/
@@ -106,3 +112,26 @@ iaga_shared.db
 
 # Local-only audit report (senior read-only review). Never committed.
 /AUDIT.md
+
+# Obsidian vault that happens to live in the working copy. Not part of the
+# product, and untracked-but-unignored meant a stray `git add -A` would commit it.
+/io/
+
+# Local agent wiring, written into whatever repo the sidecar governs.
+# Machine-specific (absolute binary paths, ports, a mined policy) and never the
+# same on two checkouts. Same class as .claude/ above.
+.iaga/
+.codex/
+.cursor/
+
+# The coding-agent skill is a self-contained Node package on its way to its own
+# repository: it is NOT a Cargo workspace member and is not released with the
+# sidecar. Keeping it untracked-but-unignored meant a stray `git add -A` would
+# commit half a second product.
+sentinel-skill/
+
+# Internal working prompts for release/audit sessions. Italian, process-
+# specific, and about how the work was driven rather than how the product works;
+# the public docs are English. Same posture as /AUDIT.md.
+docs/demo/PROMPT_*.md
+/.audit/

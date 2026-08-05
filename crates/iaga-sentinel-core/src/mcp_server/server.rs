@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 
 use crate::core::errors::SentinelError;
 use crate::core::types::{InspectRequest, ResponseScanRequest};
 use crate::events::bus::SentinelEvent;
-use crate::mcp_proxy::protocol::{JsonRpcRequest, JsonRpcResponse, McpToolCallParams, McpToolInfo};
+use crate::mcp_proxy::protocol::{
+    CappedLines, JsonRpcRequest, JsonRpcResponse, McpToolCallParams, McpToolInfo, MAX_LINE_BYTES,
+};
 use crate::pipeline::execute_pipeline::{execute_pipeline, scan_response};
 use crate::server::app_state::AppState;
 
@@ -50,7 +52,7 @@ pub async fn run_mcp_server(state: Arc<AppState>) -> Result<(), SentinelError> {
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin).lines();
+    let mut reader = CappedLines::new(BufReader::new(stdin), MAX_LINE_BYTES);
 
     while let Some(line) = reader.next_line().await? {
         if line.trim().is_empty() {

@@ -169,10 +169,12 @@ impl ReceiptStore for PgReceiptStore {
 
     async fn list_runs(&self, limit: u32) -> Result<Vec<RunSummary>> {
         let rows = sqlx::query(
+            // See the sqlite twin: `last_ts` alone is not a total order, so
+            // equal-timestamp runs came back in a different order on every call.
             "SELECT run_id, COUNT(*) as cnt, MIN(timestamp) as first_ts, \
                     MAX(timestamp) as last_ts \
              FROM receipts GROUP BY run_id \
-             ORDER BY last_ts DESC LIMIT $1",
+             ORDER BY last_ts DESC, run_id ASC LIMIT $1",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)

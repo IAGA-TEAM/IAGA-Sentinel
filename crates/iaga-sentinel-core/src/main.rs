@@ -989,11 +989,24 @@ async fn cmd_serve(
     // Spawn webhook delivery worker
     webhooks::spawn_webhook_worker(event_bus.clone(), webhook_manager.clone());
 
+    // Load rate limit config from DB (if persisted), otherwise use defaults.
+    // Built HERE, above the cleanup task, only so that task can prune its
+    // windows too — see `cleanup_rate_limiter` below.
+    let rate_limit_config = storage
+        .rate_limit_store
+        .load_config()
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config));
+
     // Spawn periodic TTL cleanup for session/taint data (every 5 minutes)
     // v0.4.0, also prunes durable storage in parallel
     let cleanup_nhi = storage.nhi_store.clone();
     let cleanup_session = storage.session_store.clone();
     let cleanup_taint = storage.taint_store.clone();
+    let cleanup_rate_limiter = rate_limiter.clone();
     tokio::spawn(async move {
         let interval = std::time::Duration::from_secs(iaga_sentinel::config::env::env_parse(
             "IAGA_SENTINEL_CLEANUP_INTERVAL_SECS",
@@ -1013,6 +1026,19 @@ async fn cmd_serve(
                 iaga_sentinel::modules::session_graph::session_dag::prune_stale_sessions(ttl_ms);
             let challenge_pruned =
                 iaga_sentinel::modules::nhi::crypto_identity::prune_expired_challenges();
+
+            // The rate limiter prunes each key's timestamps when that key is
+            // used, but nothing ever removed the KEYS: `windows` gained one
+            // entry per `agent_id:tool_name` pair and never lost one, so a
+            // long-lived server accumulated a map entry for every tool every
+            // agent ever called. `RateLimiter::cleanup` exists for exactly this
+            // and had no caller anywhere in the tree.
+            //
+            // Deliberately wired only now: before the `within_window` fix this
+            // method dropped EVERY window whenever host uptime was under an
+            // hour, so calling it then would have made the limiter worse rather
+            // than bounded.
+            cleanup_rate_limiter.cleanup().await;
 
             // Prune durable storage (best-effort, log errors)
             let _ = cleanup_nhi
@@ -1039,15 +1065,6 @@ async fn cmd_serve(
         }
     });
 
-    // Load rate limit config from DB (if persisted), otherwise use defaults
-    let rate_limit_config = storage
-        .rate_limit_store
-        .load_config()
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config));
     let threat_feed = build_threat_feed();
     tracing::info!(
         indicators = threat_feed.get_stats().total_indicators,
@@ -2803,7 +2820,18 @@ async fn cmd_kernel_run(
                 println!("[iaga run] pid: {}", pid);
             }
             println!("[iaga run] decision: {:?}", out.decision);
-            out.exit_code.unwrap_or(0)
+            // PIP-RUN-EXITCODE-1: on a refusal the child never starts, so
+            // `exit_code` is None — and mapping that to 0 reported success for a
+            // command the kernel had just refused to launch, so
+            // `iaga run -- <blocked> && next` still ran `next`. Mirror the
+            // `iaga inspect` convention: 0 allow / 1 review / 2 block. The
+            // strict env-denylist fail-closed path also surfaces as Block, so it
+            // is covered too. Only an allowed launch propagates the child status.
+            match out.decision {
+                KernelDecision::Allow => out.exit_code.unwrap_or(0),
+                KernelDecision::Review => 1,
+                KernelDecision::Block => 2,
+            }
         }
         Err(e) => {
             eprintln!("[iaga run] error: {}", e);
@@ -2827,7 +2855,14 @@ async fn cmd_replay(
     };
 
     if !db_url.starts_with("sqlite:") {
-        eprintln!("iaga replay: only sqlite:// URLs are supported in 1.0-alpha.1");
+        // The message used to name "1.0-alpha.1", which is neither this binary's
+        // version nor a version the restriction is tied to. On a Postgres
+        // deployment this is the whole story for chain export and offline
+        // verification: there is no shipped path, so say that plainly.
+        eprintln!(
+            "iaga replay: only sqlite: database URLs are supported; \
+             chain export and offline verification are not available on Postgres"
+        );
         return 2;
     }
 
@@ -2946,6 +2981,16 @@ async fn cmd_replay(
             }
         };
         let count = chain.len();
+        // PIP-EXPORT-EMPTY-1: an unknown or mistyped run_id resolves to an empty
+        // chain. Writing it anyway produced a file that looks authentic — real
+        // signer_key_id, real verifying key, `"receipts": []` — and exited 0, so
+        // nothing downstream could tell "exported the evidence" from "exported
+        // nothing". Only a verifier caught it, and only if someone ran one.
+        // Refuse rather than emit empty evidence.
+        if chain.is_empty() {
+            eprintln!("iaga replay --export: no receipts for run_id '{rid}'; nothing was written");
+            return 3;
+        }
         let doc = ChainExport {
             run_id: rid.to_string(),
             signer_key_id: signer.key_id().to_string(),

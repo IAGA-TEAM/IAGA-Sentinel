@@ -453,6 +453,17 @@ export class SentinelClient {
         ...init,
         headers: { ...this.headers, ...(init?.headers as Record<string, string> | undefined) },
         signal: controller.signal,
+        // Never follow a redirect to the sidecar. `fetch` follows by default, and
+        // measured, that was a complete bypass: a 307 from the configured URL to
+        // an attacker-controlled server made this client return that server's
+        // `decision: "allow"` — with no evidence anywhere, because the real
+        // sidecar was never reached. The Python SDK (httpx, follow_redirects
+        // off) already refuses; this brings the TypeScript client in line.
+        //
+        // `manual` rather than `error` so the status is surfaced as a normal
+        // SentinelApiError below and the caller's fail-open/fail-closed policy
+        // decides, instead of a transport exception bypassing that logic.
+        redirect: "manual",
       });
 
       if (!response.ok) {

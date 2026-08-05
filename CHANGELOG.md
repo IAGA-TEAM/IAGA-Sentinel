@@ -19,6 +19,280 @@ early-access list.
 
 ---
 
+## [2.0.1], 2026-08-05 — Layers That Reported Themselves Present and Were Not
+
+A patch release, and every entry in it is a defect that **predates 2.0.0** — most of them the first
+commit. No feature, no new endpoint, no new configuration key. The theme is uncomfortable and worth
+stating plainly: four of these are components that announce themselves in the response, in the layer
+inventory or in the config schema, and do nothing. A gate that reports itself present and never fires
+is worse than one that is absent, because the absence is at least visible.
+
+**Compatibility.** The receipt schema, the wire contract and the Dictum language are unchanged: no
+receipt field was added, removed or renamed, so every verifier and the receipt DB schema are
+untouched, and receipts produced by any earlier release still verify. Three changes are behaviour a
+caller can observe, all of them deliberate and all of them the point of the release: the rate limiter
+now actually refuses (below), `sandboxResult` now appears on high-risk actions, and three CLI paths
+now exit non-zero on a refusal instead of 0. A profile that explicitly sets `toolTrust` is now scored
+with the value it declares rather than 0.7, which can move that agent's `risk_score` — see below.
+
+Migration `0006_tool_trust` is additive with a default equal to the value those rows were already
+being scored with, so an upgraded database governs exactly as it did before. `scripts/rollback_0006.*`
+rolls it back; run it **before** downgrading the binary, because sqlx validates the applied set at
+startup and refuses to run against a database carrying a migration it does not know.
+
+Both backends were exercised on a live server for this release, not only compiled: on Postgres 16
+the migration applied, a `toolTrust: 0.05` profile round-tripped through import → column →
+`GET /v1/profiles`, a governed `/v1/inspect` blocked and persisted its audit row, and the rollback
+script ran end to end — printing the value it was about to discard, dropping the column, deleting
+the ledger row, with a subsequent `iaga migrate` re-applying cleanly and the trust back at `0.7`,
+which is the data loss the script's own header documents.
+
+### Added
+
+- **A real release workflow.** `.github/workflows/release.yml` builds five targets on a `v*`
+  tag — Linux x86_64/aarch64, macOS x86_64/aarch64, Windows x86_64 — and publishes
+  `iaga-<version>-<target>.tar.gz` plus a single `SHA256SUMS`. Each archive carries **both**
+  binaries, `iaga` and `iaga-verify`, with `LICENSE`, `DISCLAIMER.md` and
+  `THIRD_PARTY_NOTICES.md`. This replaces the `release` job in `ci.yml`, which attached one
+  bare, unversioned Linux `iaga-sentinel` binary: no macOS, no Windows, no checksum, and no
+  `iaga-verify` — so the offline proof the README sells was not in the release. That job was
+  removed rather than left in place, because two `action-gh-release` calls on the same tag
+  race each other.
+- **`charts/iaga-sentinel/README.md`**, which did not exist. It documents the three
+  independent places the image tag is pinned (`Chart.yaml: appVersion`,
+  `values.yaml: image.tag`, `deploy/kubernetes/deployment.yaml`) and how to check they
+  agree — the check that would have caught the `v1.8.1` defect below — plus the four-step
+  migration rollback, in order, with what it costs.
+- **`docs/releases/2.0.1.md`**, the longer write-up: what each dead component claimed versus
+  what it did, the four caller-observable changes, the upgrade path, and the known gaps.
+- **`scripts/uninstall.ps1` / `scripts/uninstall.sh` — a way out that is as short as the way in.**
+  Removing the product was three paragraphs of prose in `AGENTS.md` §19 and nothing else, which is
+  how a governance tool becomes the thing people rip out badly: half-deleted, or with the signing
+  key gone. The script is a **dry run by default** — it prints every file it would remove, says what
+  that costs (the audit trail and the receipts in that database; chains already exported keep
+  verifying), and exits. `-Yes` / `--yes` goes through with it. Two guards that matter: it
+  **refuses** to delete anything while a governed process still holds the database, and it
+  **keeps the signing key** unless you spell out `-IncludeKey` / `--include-key`, because deleting
+  that makes every receipt ever exported from this machine permanently unverifiable — including
+  copies already in someone else's hands. It ends by saying plainly that the agent is now
+  ungoverned, rather than leaving that to be assumed. Surfaced in the README next to the one-prompt
+  setup, so both directions are visible from the front page.
+
+### Fixed
+
+- **The rate limiter never fired during the first hour of host uptime.** `Instant`'s epoch is
+  implementation-defined — on Windows it is system boot — so when `now` is closer to that epoch than
+  the window, `now.checked_sub(window)` returns `None`. All five call sites spelled that
+  `.unwrap_or(now)`, which reads as "the window starts now" and therefore **excluded every prior
+  timestamp instead of including them all**. Consequences, measured on one build: `check_rate` pruned
+  each key's vector to empty on every call, so all three counters read zero and the limiter allowed
+  everything — **80 of 80 calls at a configured 60/min, 5 of 5 at 1/min**; `cleanup` dropped every
+  window it touched; `status` reported zero traffic. A/B on the **same binary**: uptime 00:59:50 → 0
+  refusals in 80; uptime 01:03:28 → 70 refusals. Above an hour it rate-limits correctly, which is why
+  the three end-to-end rate-limiter tests read as flaky for eight releases rather than failing. The
+  window predicate is now one function, `within_window`, with the `None` branch answering `true`, and
+  two unit tests drive both branches from the other side so the assertion does not depend on the
+  host's uptime.
+- **`GET /v1/rate-limit/status/{agent}` reported zero traffic for every agent, forever.**
+  `check_rate` records under the key `agent_id:tool_name` — the pipeline always supplies a tool
+  name — while `status` looked up the bare `agent_id`, a key nothing ever writes. Found by
+  driving a 2.0.1 build the way an operator would: 12 governed calls, `requestsLastMinute: 0`,
+  and the very next call refused with "Rate limit exceeded". A status endpoint that always
+  reports zero is worse than no status endpoint, because it reads as evidence that the limiter
+  is idle — and it is what an operator checks *before* concluding the limiter is broken. It now
+  reports the **maximum** over the agent's per-tool windows, which is the number comparable to
+  the `config` shipped in the same payload: when they are equal, the next call on that tool is
+  refused. Independent of the window defect above; fixing that one exposed this one.
+- **`RateLimiter::cleanup()` had no caller anywhere in the tree.** The limiter prunes a key's
+  timestamps when that key is used, but nothing ever removed the **keys**: `windows` gained one entry
+  per `agent_id:tool_name` pair and never lost one, so a long-lived server accumulated a map entry for
+  every tool every agent ever called. Wired into the existing periodic cleanup task. Deliberately not
+  wired before the fix above, because until then this method dropped *every* window under an hour of
+  uptime.
+- **The containment layer never activated: 0 times out of 42 measured actions.** `should_sandbox` was
+  fed `adaptive_result.total_score` while its thresholds (40 / 50 / 65) sit on the **composite** scale
+  — the same scale as `threshold_review` 35 and `threshold_block` 70. The two do not overlap where it
+  matters: across 42 actions the adaptive score spanned 9..40 while the composite spanned 2..84, so
+  nothing ever reached any of the three thresholds, including `curl … | sh`, which scores 84 and
+  blocks while charging adaptive 30. The layer now runs after the composite exists and is fed
+  `risk.score`; 17 of the same 42 actions are now contained. `sandbox_result` is advisory — it is not
+  part of the signed receipt and feeds no term of the composite — so this changes which responses
+  carry a `sandboxResult` and changes no verdict, score, reason or signed byte.
+- **`AgentProfile.toolTrust` was parsed, validated, exported, and then discarded by both storage
+  backends.** Both row mappers hydrated a literal `0.7`, so the configured value never survived a
+  round trip. Measured: an agent configured `toolTrust: 0.05` and an agent with no setting at all
+  produced the identical reputation signal (score 28, "moderate trust: 0.60"), and
+  `GET /v1/profiles/{id}` reported `0.7` for the agent configured at `0.05` — a silent policy loss
+  with a read-back that confirmed the wrong value. Migration `0006_tool_trust` (SQLite + Postgres),
+  idempotent backfill for existing community databases, rollback scripts, and
+  `tool_trust_roundtrip.rs` to pin the round trip.
+- **Three shipped CLI paths answered a *refusal* with success.** In each case the library underneath
+  was correct *and covered by a test*; the thin adapter on top was neither, so the suite stayed green
+  over all three. None touches a receipt byte, and the oldest dates to 1.1.0.
+  - **`iaga proxy` wedged on the MCP handshake.** `forward_and_relay` waited for a reply to every
+    forwarded message, including JSON-RPC *notifications*, which by definition never get one.
+    `notifications/initialized` is the mandatory third step of the handshake, so **every
+    spec-compliant MCP client** broke the proxy on its first connection: the downstream server was
+    torn down and the next real request failed with `-32603`. The proxy now forwards a notification
+    without waiting and without emitting a response line (JSON-RPC 2.0 §4.1). A `tools/call` arriving
+    as a notification is malformed and is dropped rather than forwarded — and audited as a Block, so
+    an attempt to invoke a tool outside governance leaves a durable record instead of a stderr line.
+    `iaga mcp-server` was correct throughout.
+  - **`iaga run` exited 0 when the kernel refused the launch.** On `Block`, on `Review`, and on the
+    strict env-denylist fail-closed path, the child never starts, so `LaunchOutcome::exit_code` is
+    `None` — and the CLI mapped that to process exit 0. `iaga run -- <blocked command> && next_step`
+    therefore ran `next_step`. Now mirrors the `iaga inspect` convention: 0 allow / 1 review /
+    2 block, with only an allowed launch propagating the child's own status.
+  - **`iaga replay --export` wrote empty evidence and exited 0.** An unknown or mistyped `run_id`
+    produced a file that reads as authentic — real `signer_key_id`, real `signer_verifying_key`,
+    `"receipts": []` — and reported success, so nothing downstream could distinguish "exported the
+    evidence" from "exported nothing". It now writes no file and exits 3. The Postgres-only message
+    it prints alongside no longer claims a "1.0-alpha.1" restriction that has not existed for eight
+    releases.
+  - `crates/iaga-sentinel-core/tests/cli_refusal_contract.rs` pins all four exit paths against the
+    real binary. Each test was confirmed to fail against the unpatched code first — the proxy case by
+    hanging, which is what the old code did to a real client.
+- **The TypeScript SDK followed redirects to the sidecar, which is a complete bypass.** `fetch`
+  follows by default, so a `307` from the configured sidecar URL to an attacker-controlled server made
+  `SentinelClient` return **that** server's `decision: "allow"` — with no evidence anywhere, because
+  the real sidecar was never reached. Now `redirect: "manual"`, so the redirect status surfaces as an
+  ordinary `SentinelApiError` and the caller's fail-open/fail-closed policy decides, rather than a
+  transport exception bypassing that logic. The Python SDK (httpx, `follow_redirects` off) was already
+  correct.
+- **Three responses were not reproducible between identical runs.** `taintAnalysis.accumulatedLabels`
+  serialized a `HashSet`, whose iteration order depends on the hasher's per-process seed (45 differing
+  array positions across two identical runs of the same 42 actions); `/v1/sessions` listed a `HashMap`
+  (62 moving positions); and both receipt stores ordered `list_runs` by `last_ts` alone, which is not
+  a total order, so runs written in the same second tied and the tie broke differently on every call
+  (50 moving `run_id` positions). None reached a signed field, so no receipt byte moved — what they
+  did was make a response impossible to diff byte-for-byte, one code change away from a
+  nondeterministic receipt. All three are now ordered at the source.
+- **The MCP stdio planes read lines of unbounded length.** Both `iaga mcp-server` and `iaga proxy`
+  read from stdin with `BufReader::lines()`, which grows a `String` until it finds a newline: a
+  downstream server or a client that never emits one could take the process to OOM. Capped at 2 MiB,
+  aligned with the HTTP body limit, and cancel-safe because the proxy reads inside a `tokio::select!`.
+  Verified live: a 3 MiB line exits 1 with nothing processed.
+- **Deploy manifests shipped a three-release-old image from a namespace CI no longer publishes to.**
+  `helm install` of this chart labelled every object with the current version and then pulled
+  `ghcr.io/edoardobambini/iaga-sentinel:v1.8.1`. Since 1.9.0 CI publishes to
+  `ghcr.io/iaga-team/iaga-sentinel` (`GITHUB_TOKEN` carries `packages:write` for the owning org, so a
+  personal namespace 403s). The chart, `deploy/kubernetes/deployment.yaml`, both plug-in
+  `docker-compose.yml` files, `plug-ins/README.md`, `README.md` and `AGENTS.md` now all point at the
+  namespace releases actually land in, at `v2.0.1`. Tags published before 1.9.0 under the old
+  namespace still resolve; nothing new is pushed there.
+- **The repository URL is now consistently `IAGA-TEAM/IAGA-Sentinel`.** Two identities had been
+  coexisting: `README.md`'s install command and `AGENTS.md` pointed at the org, while `Cargo.toml`
+  `repository`, `CITATION.cff`, `CONTRIBUTING.md`'s clone line, `docs/openapi.yaml`, the Helm chart's
+  `sources`, and the SDK/plug-in package metadata still pointed at the personal namespace. The
+  CHANGELOG entry recording the 1.1.0 rebrand is left as written — it was true then — and the chart's
+  `maintainers[].url` still points at the maintainer's own profile, because that is a person and not
+  the repository.
+- **No `.dockerignore`.** The Dockerfile reads only `Cargo.toml`, `Cargo.lock`, `crates/`, `LICENSE`
+  and `THIRD_PARTY_NOTICES.md`, but the whole working tree was uploaded as build context — including
+  `target/` (6-10 GB once built locally), `node_modules/` and `.venv/`. Added, with the paths the
+  runtime stage does copy called out explicitly so it cannot silently starve the build.
+- **`*.db` did not cover SQLite's sidecar files**, so `iaga_shared.db-journal` survived a run of
+  `scripts/agent_bootstrap.*` as an untracked file. `.gitignore` now covers `-journal`, `-shm` and
+  `-wal`.
+- **`docs/openapi.yaml` documented an API that does not exist.** `/v1/response/scan` was specified as
+  `{text, agentId}` returning `{clean, findings:[objects]}`; the real contract is
+  `{requestId, agentId, toolName, responsePayload}` returning
+  `{requestId, decision, riskScore, findings:[string], redactedPayload?}`, and the `ResponseDecision`
+  enum was absent from the file entirely. A client built from the spec got a 422. `SensitivePattern`
+  also carried a non-existent `enabled` field and the wrong category enum (the real ones are `pii`,
+  `financial`, `credential`).
+- **The same for the rate-limit schemas.** `RateLimitConfig` was specified as
+  `{requestsPerSecond, burstSize, windowSeconds, cooldownSeconds}`; the real body is
+  `{maxPerMinute, maxPerHour, burstLimit}`, and none of the three carries a serde default, so a
+  request written from the old spec is rejected outright — **measured: `POST /v1/rate-limit/config`
+  with the documented body returns 422**, the corrected body returns 200. `RateLimitStatus` was
+  specified as `{allowed, remaining, limit, resetAt}`; not one of those fields exists. The real
+  response is `{agentId, requestsLastMinute, requestsLastHour, requestsLast5Seconds, config}`.
+- **`AGENTS.md` documented a config-file behaviour the code does not have.** It listed six candidate
+  filenames (there are three) and said the file is imported "if the DB is fresh". It is re-imported on
+  **every** boot and upserts every profile and workspace, so anything changed in the database by
+  another route is silently overwritten on the next start — the opposite of what the file claimed. It
+  also now says which `agentId` to be **before** connecting (`404 agent_not_found` on the first
+  `iaga.inspect` is the most common first-run failure), probes over `127.0.0.1` rather than
+  `localhost` (measured **2065 ms against 47 ms** on a host where `localhost` resolves `::1` first,
+  and an outright failure under a short timeout), and carries a new §19 the agent hands to the human:
+  how to look at it, change it, turn it off, and the one file whose deletion makes every past receipt
+  permanently unverifiable.
+- **The dashboard's Evidence tab truncated every `run_id` to 16 characters**, so two different runs
+  rendered as the same string and neither could be copied into `iaga replay`. The truncation was
+  written when a run id was short; since 1.6.0 it is `<agentId>:<sessionId>`, and 16 characters no
+  longer reach the end of the agent id — measured on a two-run server, both rows read
+  `openclaw-builder`. The Evidence tab exists to answer "which run do I export and prove", so it now
+  shows the whole id, with a `title` so it is also hoverable and copyable.
+- **The demo runbook said a reset without relaunching was enough.** It is not: the session graph
+  lives in the process, not the database, so a second take against the same live server inherits the
+  first one's nodes. Measured: beat 1 comes back **REVIEW risk 35** instead of ALLOW, with
+  `session graph attack: privilege_escalation_chain`, because the two takes share one `sessionId` and
+  together read as `shell -> file_read -> shell`. The driver then correctly refuses the take — the
+  system working, not a flaky verdict. `docs/demo/README.md` now says to stop and restart the server,
+  and qualifies "identical every run" as "every run against a freshly started server", naming the two
+  pieces of state the weights reset does not cover (the session graph and per-agent NHI trust).
+- **`AGENTS.md` §10 documented exit codes for `inspect` and `iaga-verify` but not for the two
+  commands this release changes.** `iaga run` now exits 0/1/2 like `inspect`, and
+  `replay --export` exits 3 on a run with no receipts — both are the point of the fixes above, and
+  both are what a shell script keys on. The two rows now say so, and the `replay` row also spells
+  out that a `run_id` is `<agentId>:<sessionId>` (what `--list` prints), which is the shape the
+  dashboard was truncating.
+- **`AGENTS.md` §17 presented itself as the server environment-variable reference and was missing
+  eleven of them**, including the two that decide whether a denylisted variable strips or fails a
+  launch closed (`IAGA_SENTINEL_ENV_DENYLIST`, `..._STRICT`) and the four that move a verdict by
+  reshaping the session graph (`MAX_SESSIONS`, `SESSION_TTL_MS`, `BLOCK_COOLDOWN_MS`,
+  `MAX_BLOCK_COUNT`). All eleven are now listed with the defaults read from the code, grouped by what
+  they affect. Cross-checked mechanically: every `IAGA_SENTINEL_*` the crates read now appears in the
+  file, and every one the file names is read by something.
+- **`SECURITY.md` declared the `1.7.x` line supported**, three minor releases back. It now declares
+  `2.0.x` and records that older receipts keep verifying.
+- **`DATA_HANDLING.md` described `policy_hash` as "a digest of the compiled policy bundle, or a
+  default placeholder when no Dictum overlay is loaded".** That stopped being true when
+  `CRYPTO-POLICYHASH-7a` bound the real resolved workspace policy: without an overlay the digest
+  covers the workspace id, protocols, allowed domains, tools with their action types and max
+  decisions, and the two thresholds, canonicalized so reordering any of those lists does not move
+  it. An auditor recomputing the hash from the YAML as written would not have matched. The
+  `agent_profiles.tool_trust` column is documented in the same file.
+- **`docs/ARCHITECTURE.md` listed `replay` and `policy-test` as unshipped roadmap CLI commands.**
+  Both have shipped for several releases. It also still said "8 layers in 1.x", and did not
+  mention that layer 5 now runs after the composite score rather than in its listed position. Two
+  long-standing gaps were added to the open list rather than left unwritten: session state is
+  process-global rather than partitioned by workspace, and a `GET` to an allow-listed host can
+  still carry data in its query string.
+- **`CONTRIBUTING.md` capped the ADR range at 0019** (it is 0023), omitted `cargo fmt --check` and
+  `--all-features` from the commands CI actually runs, and did not say that the Postgres tests
+  report green when they are skipped — so an unset `IAGA_SENTINEL_TEST_PG_URL` looks exactly like
+  a pass.
+- **Two shipped example policies blocked ordinary traffic with `dictum-eval-error`.**
+  `url_host(Null)` is an evaluation error, and an evaluation error on a `block` policy **fires** it
+  (fail-closed, by design), so `block_offhost_http` in `examples/e2e/secrets_and_egress.dictum` and
+  `block_off_allowlist_http` in `crates/iaga-sentinel-core/examples/policies/strict.dictum` blocked
+  any `http` action carrying no `destination` — with a reason naming the evaluator rather than the
+  policy. Both now probe `action.payload.destination` first. Anyone who copied these examples has the
+  same bug.
+
+### Security
+
+- **`wasmtime` 36.0.8 → 36.0.13** (RUSTSEC-2026-0222, 3.8 low). Not in any shipped artifact — it is a
+  dev-dependency of `iaga-sentinel-dictum` only, and both `Dockerfile` and the release workflow build
+  with default features. Lock file only.
+- **`tract-nnef` 0.21.12 is deliberately left at RUSTSEC-2026-0217** (6.1 medium, `--features ml`
+  only, in no shipped artifact). Upgrading it forces `tract-linalg` to pin `time` down from 0.3.47 to
+  0.3.41, which is affected by RUSTSEC-2026-0009 (**6.8 medium** — worse than the advisory it fixes),
+  and the two constraints cannot both be satisfied inside `tract-onnx = "0.21"`. Escaping it means
+  bumping to tract 0.23, an API-breaking change to an optional backend with no ONNX model in the tree
+  to test against. Recorded as a trade-off rather than committed as a net-worse lock file.
+  **The decision is now written down where it is enforced**: the advisory is listed in
+  `.cargo/audit.toml`, which CI's `cargo audit` step reads, with the measurement behind "in no
+  shipped artifact" spelled out (`cargo tree -p iaga-sentinel-core -i tract-nnef` prints nothing;
+  `Dockerfile` and `release.yml` both build with default features; `ml` is not in `default`). Until
+  now it was written only in release notes while the check kept failing — `cargo audit` fails on
+  `main` today for the same reason, since 2.0.0 shipped the same tract version and the advisory
+  predates it. A red check nobody can act on is how real findings stop being read.
+
+---
+
 ## [2.0.0], 2026-07-24 — Fully Autonomous Agentic Usage and Setup
 
 IAGA Sentinel can now be **stood up by an AI agent on its own**, from a clean checkout, with the policy

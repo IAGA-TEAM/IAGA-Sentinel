@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::core::errors::SentinelError;
@@ -11,6 +11,49 @@ use super::protocol::*;
 #[cfg(feature = "cost-control")]
 use super::tool_interceptor::infer_action_type;
 use super::tool_interceptor::{intercept_tool_call, InterceptResult};
+
+/// Record a `tools/call` that arrived as a notification and was dropped.
+///
+/// Separate from the governance path on purpose: nothing was governed, because
+/// nothing was executed. The row exists so that "someone tried to invoke a tool
+/// through this proxy in a shape that bypasses the request/response contract" is
+/// answerable from the audit log rather than from whatever kept the proxy's
+/// stderr. It is recorded as a Block, since that is what happened to the call.
+///
+/// Best-effort: a storage failure must not take down a live proxy that is
+/// otherwise correctly refusing the call.
+pub(crate) async fn audit_dropped_notification(
+    request: &JsonRpcRequest,
+    config: &McpProxyConfig,
+    state: &Arc<AppState>,
+) {
+    let tool_name = serde_json::from_value::<McpToolCallParams>(request.params.clone())
+        .map(|p| p.name)
+        .unwrap_or_else(|_| "<unparseable>".to_string());
+
+    let stored = crate::core::types::StoredAuditEvent {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: config.agent_id.clone(),
+        tenant_id: None,
+        framework: "mcp-proxy".to_string(),
+        action_type: crate::core::types::ActionType::Custom,
+        tool_name,
+        input_sha256: String::new(),
+        decision: crate::core::types::GovernanceDecision::Block,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        reasons: vec![
+            "dropped tools/call sent as a JSON-RPC notification (no id)".to_string(),
+            "refused to forward an ungoverned tool call".to_string(),
+        ],
+        review_status: crate::core::types::ReviewStatus::NotRequired,
+        risk_score: 0,
+        usage: None,
+        session_id: None,
+    };
+    if let Err(e) = state.audit_store.append(&stored).await {
+        tracing::error!(error = %e, "failed to audit a dropped tools/call notification");
+    }
+}
 
 /// MCP Proxy Server configuration.
 pub struct McpProxyConfig {
@@ -48,12 +91,12 @@ pub async fn run_mcp_proxy(
         .ok_or_else(|| SentinelError::Proxy("Failed to capture downstream stdout".into()))?;
 
     let mut downstream_writer = downstream_stdin;
-    let mut downstream_reader = BufReader::new(downstream_stdout).lines();
+    let mut downstream_reader = CappedLines::new(BufReader::new(downstream_stdout), MAX_LINE_BYTES);
 
     // Read from our stdin (client → proxy)
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-    let mut client_reader = BufReader::new(stdin).lines();
+    let mut client_reader = CappedLines::new(BufReader::new(stdin), MAX_LINE_BYTES);
 
     loop {
         tokio::select! {
@@ -68,6 +111,35 @@ pub async fn run_mcp_proxy(
                                 continue;
                             }
                         };
+
+                        // PIP-MCP-NOTIFY-1: a JSON-RPC message with no `id` is a
+                        // notification. It gets no response, so relaying one and
+                        // then waiting for a reply blocks the proxy forever — and
+                        // `notifications/initialized` is the mandatory third step
+                        // of the MCP handshake, so every spec-compliant client hit
+                        // this on its first connection. Forward and move on.
+                        // A `tools/call` without an id is malformed (tools/call is
+                        // a request); drop it rather than forward an ungoverned call.
+                        if request.id.is_none() {
+                            if request.method == "tools/call" {
+                                tracing::warn!(
+                                    "dropping malformed tools/call notification (no id); \
+                                     refusing to forward an ungoverned tool call"
+                                );
+                                // ...and record it. Dropping was correct — forwarding
+                                // would have been an ungoverned tool call — but the
+                                // only trace was a stderr line, and stderr is exactly
+                                // what a client discards (stdout is kept clean for the
+                                // JSON-RPC channel). An attempt to invoke a tool
+                                // outside governance that leaves no durable record is
+                                // worse than the crash this branch replaced: the crash
+                                // was at least visible.
+                                audit_dropped_notification(&request, &config, &state).await;
+                            } else {
+                                forward_notification(&request, &mut downstream_writer).await;
+                            }
+                            continue;
+                        }
 
                         match request.method.as_str() {
                             "tools/call" => {
@@ -139,7 +211,7 @@ async fn handle_tool_call(
     config: &McpProxyConfig,
     state: &Arc<AppState>,
     downstream_writer: &mut tokio::process::ChildStdin,
-    downstream_reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    downstream_reader: &mut CappedLines<BufReader<tokio::process::ChildStdout>>,
 ) -> JsonRpcResponse {
     // Parse tool call params
     let tool_call: McpToolCallParams = match serde_json::from_value(request.params.clone()) {
@@ -251,10 +323,36 @@ async fn handle_tool_call(
     }
 }
 
+/// Relay a JSON-RPC notification downstream without waiting for a reply.
+///
+/// Notifications carry no `id` and are never answered (JSON-RPC 2.0 §4.1), so
+/// there is nothing to read back and nothing to return to the client.
+async fn forward_notification(
+    request: &JsonRpcRequest,
+    downstream_writer: &mut tokio::process::ChildStdin,
+) {
+    let line = match serde_json::to_string(request) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to serialize MCP notification");
+            return;
+        }
+    };
+    if let Err(e) = downstream_writer.write_all(line.as_bytes()).await {
+        tracing::error!(error = %e, "Failed to write notification to downstream");
+        return;
+    }
+    if let Err(e) = downstream_writer.write_all(b"\n").await {
+        tracing::error!(error = %e, "Failed to write notification to downstream");
+        return;
+    }
+    let _ = downstream_writer.flush().await;
+}
+
 async fn forward_and_relay(
     request: &JsonRpcRequest,
     downstream_writer: &mut tokio::process::ChildStdin,
-    downstream_reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    downstream_reader: &mut CappedLines<BufReader<tokio::process::ChildStdout>>,
 ) -> JsonRpcResponse {
     // Send to downstream
     let line = match serde_json::to_string(request) {

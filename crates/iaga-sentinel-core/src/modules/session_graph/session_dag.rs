@@ -810,7 +810,7 @@ pub struct SessionInfo {
 
 pub fn list_active_sessions() -> Vec<SessionInfo> {
     let store = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    store
+    let mut out: Vec<SessionInfo> = store
         .values()
         .map(|s| SessionInfo {
             session_id: s.session_id.clone(),
@@ -818,7 +818,14 @@ pub fn list_active_sessions() -> Vec<SessionInfo> {
             node_count: s.nodes.len(),
             state: s.state,
         })
-        .collect()
+        .collect();
+    // `SESSIONS` is a HashMap, so this listing came back in a different order on
+    // every call — measured as 62 moving positions across two identical runs.
+    // Sorting at the source rather than in the handler keeps every consumer of
+    // this function (the API, the dashboard, any export) consistent, and makes
+    // paging over the result well-defined.
+    out.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]

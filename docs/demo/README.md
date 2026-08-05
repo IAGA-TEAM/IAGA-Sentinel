@@ -109,11 +109,21 @@ re-seeds:
 .\scripts\demo.ps1
 ```
 
-For a hard manual reset without relaunch:
+For a hard manual reset:
 
 ```powershell
 Remove-Item .\iaga_sentinel.db,.\iaga_sentinel.db-wal,.\iaga_sentinel.db-shm,.\chain.json -ErrorAction SilentlyContinue
 ```
+
+> **Stop the server first, and start a new one afterwards — deleting the database
+> is not enough.** The session graph lives in the process, not in the database, so
+> a server that stays up keeps every node the previous take added. Measured: a
+> second run of the driver against the same live server returns **REVIEW risk 35**
+> on beat 1 instead of ALLOW, with the reason
+> `session graph attack: privilege_escalation_chain` — the two takes share one
+> `sessionId`, so together they read as `shell -> file_read -> shell`. The driver
+> then correctly refuses the take. That is the system working; it is not a flaky
+> verdict, and it is why the relaunch path above exists.
 
 > Keep `%USERPROFILE%\.iaga-sentinel\keys\receipt_signer.ed25519` so the pinned
 > public key stays identical across takes.
@@ -122,7 +132,11 @@ Remove-Item .\iaga_sentinel.db,.\iaga_sentinel.db-wal,.\iaga_sentinel.db-shm,.\c
 
 - A fresh server starts with default adaptive risk weights, and the driver also
   POSTs `/v1/risk/weights/reset` once at the start. The driver never sends
-  `/v1/risk/feedback`. So the verdicts are identical every run.
+  `/v1/risk/feedback`. So the verdicts are identical **on every run against a
+  freshly started server** — which is the qualification that matters: the weights
+  reset covers the adaptive scorer, and nothing resets the in-process session
+  graph or the per-agent NHI trust, both of which move a verdict. One take per
+  server process; restart between takes (see "hard manual reset" above).
 - The driver **asserts** each verdict. If any beat does not match
   Allow/Review/Block it prints a red **STOP** banner and exits non-zero - never
   record a take that failed assertions.

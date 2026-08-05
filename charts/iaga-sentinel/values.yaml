@@ -5,8 +5,8 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/edoardobambini/iaga-sentinel
-  tag: v1.8.1
+  repository: ghcr.io/iaga-team/iaga-sentinel
+  tag: v2.0.1
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

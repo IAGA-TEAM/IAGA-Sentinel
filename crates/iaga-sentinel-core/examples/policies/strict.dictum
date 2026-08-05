@@ -16,8 +16,13 @@ policy "review_all_email_egress" {
   then review, reason="all email goes through human review under strict overlay"
 }
 
+// The `and action.payload.destination` probe is load-bearing, not decoration:
+// url_host(Null) is an eval error, and an eval error on a `block` policy FIRES
+// it. Without the probe, an http action carrying no `destination` is blocked
+// with the reason `dictum-eval-error` — measured, not theorised.
 policy "block_off_allowlist_http" {
   when action.kind == "http"
+   and action.payload.destination
    and url_host(action.payload.destination) not in workspace.allowlist
   then block, reason="off-allowlist http egress"
 }

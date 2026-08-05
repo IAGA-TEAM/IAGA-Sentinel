@@ -9,7 +9,7 @@
 # the agent a brain — pass it through the `letta` service environment.
 services:
   sentinel:
-    image: ghcr.io/edoardobambini/iaga-sentinel:v1.8.1
+    image: ghcr.io/iaga-team/iaga-sentinel:v2.0.1
     command: ["serve"]
     environment:
       IAGA_SENTINEL_OPEN_MODE: "true"

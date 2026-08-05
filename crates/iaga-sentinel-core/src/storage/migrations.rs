@@ -39,6 +39,10 @@ pub async fn run_sqlite_migrations(pool: &sqlx::SqlitePool) -> Result<(), Sentin
         ("audit_events", "model", "TEXT DEFAULT NULL"),
         // 1.5.2 API key scope (idempotent backfill for older community DBs)
         ("api_keys", "scope", "TEXT NOT NULL DEFAULT 'admin'"),
+        // 2.0.1 audit: persisted tool_trust (idempotent backfill for older
+        // community DBs). 0.7 is the value those rows were already being scored
+        // with while the column did not exist, so backfilling changes no verdict.
+        ("agent_profiles", "tool_trust", "REAL NOT NULL DEFAULT 0.7"),
     ] {
         ensure_sqlite_column(pool, table, column, definition).await?;
     }
@@ -93,6 +97,10 @@ pub async fn run_postgres_migrations(pool: &sqlx::PgPool) -> Result<(), Sentinel
         "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS model TEXT DEFAULT NULL",
         // 1.5.2 API key scope (idempotent backfill for older community DBs)
         "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'admin'",
+        // 2.0.1 audit: persisted tool_trust (idempotent backfill for older
+        // community DBs). 0.7 is the value those rows were already being scored
+        // with while the column did not exist, so backfilling changes no verdict.
+        "ALTER TABLE IF EXISTS agent_profiles ADD COLUMN IF NOT EXISTS tool_trust DOUBLE PRECISION NOT NULL DEFAULT 0.7",
     ] {
         sqlx::query(ddl).execute(pool).await?;
     }

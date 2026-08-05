@@ -1,7 +1,7 @@
 # IAGA Sentinel — plug-in for VoltAgent
 
 Govern every [VoltAgent](https://voltagent.dev) tool call through a local
-[IAGA Sentinel](https://github.com/EdoardoBambini/IAGA-Sentinel) sidecar. Each
+[IAGA Sentinel](https://github.com/IAGA-TEAM/IAGA-Sentinel) sidecar. Each
 call is inspected for an `allow` / `review` / `block` verdict before it runs, and
 every verdict becomes an Ed25519-signed receipt linked into a hash-chained append-log
 that verifies offline.
@@ -12,7 +12,7 @@ default.
 ## Quickstart
 
 ```bash
-docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true ghcr.io/edoardobambini/iaga-sentinel:v1.8.1 serve
+docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true ghcr.io/iaga-team/iaga-sentinel:v2.0.1 serve
 npm i @iaga-sentinel/voltagent @voltagent/core
 ```
 

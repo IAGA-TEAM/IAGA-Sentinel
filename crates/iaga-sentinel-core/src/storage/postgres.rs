@@ -514,7 +514,7 @@ impl ReviewStore for PostgresStorage {
 impl PolicyStore for PostgresStorage {
     async fn get_agent_profile(&self, agent_id: &str) -> Result<AgentProfile, SentinelError> {
         let row = sqlx::query(
-            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools::text, approved_secrets::text, baseline_action_types::text
+            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools::text, approved_secrets::text, baseline_action_types::text, tool_trust
              FROM agent_profiles WHERE agent_id = $1"
         )
         .bind(agent_id)
@@ -543,7 +543,7 @@ impl PolicyStore for PostgresStorage {
 
     async fn list_profiles(&self) -> Result<Vec<AgentProfile>, SentinelError> {
         let rows = sqlx::query(
-            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools::text, approved_secrets::text, baseline_action_types::text
+            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools::text, approved_secrets::text, baseline_action_types::text, tool_trust
              FROM agent_profiles ORDER BY agent_id"
         )
         .fetch_all(&self.pool)
@@ -591,8 +591,8 @@ impl PolicyStore for PostgresStorage {
             .to_string();
 
         sqlx::query(
-            "INSERT INTO agent_profiles (agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, NOW())
+            "INSERT INTO agent_profiles (agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, tool_trust, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, NOW())
              ON CONFLICT(agent_id) DO UPDATE SET
                 tenant_id = EXCLUDED.tenant_id,
                 workspace_id = EXCLUDED.workspace_id,
@@ -601,6 +601,7 @@ impl PolicyStore for PostgresStorage {
                 approved_tools = EXCLUDED.approved_tools,
                 approved_secrets = EXCLUDED.approved_secrets,
                 baseline_action_types = EXCLUDED.baseline_action_types,
+                tool_trust = EXCLUDED.tool_trust,
                 updated_at = NOW()"
         )
         .bind(&profile.agent_id)
@@ -611,6 +612,7 @@ impl PolicyStore for PostgresStorage {
         .bind(&tools)
         .bind(&secrets)
         .bind(&baselines)
+        .bind(profile.tool_trust)
         .execute(&self.pool)
         .await?;
 
@@ -989,7 +991,9 @@ fn pg_row_to_profile(row: &sqlx::postgres::PgRow) -> AgentProfile {
             let s: String = row.try_get("baseline_action_types").unwrap_or_default();
             parse_json_or_warn(&s, "agent_profiles.baseline_action_types")
         },
-        tool_trust: 0.7,
+        // Databases created before migration 0007 have no column; the fallback
+        // is the same 0.7 those rows were already being scored with.
+        tool_trust: row.try_get("tool_trust").unwrap_or(0.7),
     }
 }
 

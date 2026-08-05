@@ -23,13 +23,13 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 # Minimum Supported Rust Version. Floor set by transitive deps in Cargo.lock
 # (`home 0.5.12` needs 1.88); bump deliberately, note it in CHANGELOG.md.
 rust-version = "1.88"
 license = "BUSL-1.1"
-repository = "https://github.com/EdoardoBambini/IAGA-Sentinel"
+repository = "https://github.com/IAGA-TEAM/IAGA-Sentinel"
 authors = ["Edoardo Bambini"]
 
 # Lint policy shared by every crate (each adds `[lints] workspace = true`).

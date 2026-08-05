@@ -638,7 +638,7 @@ impl ReviewRow {
 impl PolicyStore for SqliteStorage {
     async fn get_agent_profile(&self, agent_id: &str) -> Result<AgentProfile, SentinelError> {
         let row = sqlx::query_as::<_, ProfileRow>(
-            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types
+            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, tool_trust
              FROM agent_profiles WHERE agent_id = ?"
         )
         .bind(agent_id)
@@ -667,7 +667,7 @@ impl PolicyStore for SqliteStorage {
 
     async fn list_profiles(&self) -> Result<Vec<AgentProfile>, SentinelError> {
         let rows = sqlx::query_as::<_, ProfileRow>(
-            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types
+            "SELECT agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, tool_trust
              FROM agent_profiles ORDER BY agent_id"
         )
         .fetch_all(&self.pool)
@@ -716,8 +716,8 @@ impl PolicyStore for SqliteStorage {
         let now = chrono::Utc::now().to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO agent_profiles (agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "INSERT INTO agent_profiles (agent_id, tenant_id, workspace_id, framework, role, approved_tools, approved_secrets, baseline_action_types, tool_trust, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(agent_id) DO UPDATE SET
                 tenant_id = excluded.tenant_id,
                 workspace_id = excluded.workspace_id,
@@ -726,6 +726,7 @@ impl PolicyStore for SqliteStorage {
                 approved_tools = excluded.approved_tools,
                 approved_secrets = excluded.approved_secrets,
                 baseline_action_types = excluded.baseline_action_types,
+                tool_trust = excluded.tool_trust,
                 updated_at = excluded.updated_at"
         )
         .bind(&profile.agent_id)
@@ -736,6 +737,7 @@ impl PolicyStore for SqliteStorage {
         .bind(&tools)
         .bind(&secrets)
         .bind(&baselines)
+        .bind(profile.tool_trust)
         .bind(&now)
         .execute(&self.pool)
         .await?;
@@ -846,6 +848,7 @@ struct ProfileRow {
     approved_tools: String,
     approved_secrets: String,
     baseline_action_types: String,
+    tool_trust: f64,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ProfileRow {
@@ -860,6 +863,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ProfileRow {
             approved_tools: row.try_get("approved_tools")?,
             approved_secrets: row.try_get("approved_secrets")?,
             baseline_action_types: row.try_get("baseline_action_types")?,
+            // Databases created before migration 0007 have no column. The
+            // fallback is the same 0.7 those rows were being scored with, so an
+            // un-migrated database keeps its current behaviour exactly.
+            tool_trust: row.try_get("tool_trust").unwrap_or(0.7),
         })
     }
 }
@@ -885,7 +892,7 @@ impl ProfileRow {
                 &self.baseline_action_types,
                 "agent_profiles.baseline_action_types",
             ),
-            tool_trust: 0.7,
+            tool_trust: self.tool_trust,
         }
     }
 }

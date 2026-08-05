@@ -13,10 +13,10 @@ authors:
     given-names: William
   - family-names: Bohr
     given-names: Justus Moritz
-version: "2.0.0"
-date-released: "2026-07-19"
+version: "2.0.1"
+date-released: "2026-08-05"
 license: BUSL-1.1
-repository-code: "https://github.com/EdoardoBambini/IAGA-Sentinel"
+repository-code: "https://github.com/IAGA-TEAM/IAGA-Sentinel"
 url: "https://www.iaga.tech"
 keywords:
   - ai-agents

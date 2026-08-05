@@ -109,11 +109,27 @@ pub struct TaintViolation {
 
 // ── Analysis Result ──
 
+/// Serialize a label set in a stable order.
+///
+/// `HashSet` iterates in an order that depends on the hasher's per-process
+/// random seed, so the same verdict serialized twice produced the same SET in a
+/// different ORDER — measured as 45 differing array positions across two
+/// identical runs of the same 42 actions. The set never reached `reasons` or any
+/// receipt field, so no signed byte moved; what it did was make the verdict
+/// payload impossible to compare byte-for-byte, one code change away from a
+/// nondeterministic receipt.
+fn sorted_labels<S: serde::Serializer>(v: &HashSet<String>, s: S) -> Result<S::Ok, S::Error> {
+    let mut labels: Vec<&String> = v.iter().collect();
+    labels.sort();
+    s.collect_seq(labels)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaintAnalysisResult {
     pub source_taints: Vec<String>,
     pub sink_type: Option<String>,
+    #[serde(serialize_with = "sorted_labels")]
     pub accumulated_labels: HashSet<String>,
     pub violations: Vec<TaintViolation>,
     pub blocked: bool,

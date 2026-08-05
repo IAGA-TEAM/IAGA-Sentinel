@@ -331,12 +331,6 @@ jobs:
           ./target/release/iaga policy lint crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum
           ./target/release/iaga policy test crates/iaga-sentinel-dictum/examples/no_pii_egress.dictum --context crates/iaga-sentinel-dictum/examples/sample_context.json
 
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: iaga-sentinel-binary
-          path: target/release/iaga-sentinel
-
   compile-sanity:
     # 1.5.2: promoted to a blocking status. Windows is the primary dev
     # platform (the workspace builds there daily) and macOS has no
@@ -364,21 +358,11 @@ jobs:
       - name: Build workspace (no tests)
         run: cargo build --workspace
 
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    steps:
-      - name: Download binary artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: iaga-sentinel-binary
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: iaga-sentinel
-          generate_release_notes: true
+  # A `release` job used to sit here. It attached one bare, unversioned Linux
+  # `iaga-sentinel` binary to the tag: no macOS, no Windows, no `iaga-verify`
+  # (so the offline proof the README sells was not in the release), no licence
+  # or notices alongside it, and no checksum to verify the download against.
+  # Replaced in 2.0.1 by `release.yml`, which builds five targets, packages both
+  # binaries with LICENSE/DISCLAIMER/THIRD_PARTY_NOTICES, and publishes a single
+  # `SHA256SUMS`. Removed rather than left disabled: two `action-gh-release`
+  # calls on the same tag race each other.

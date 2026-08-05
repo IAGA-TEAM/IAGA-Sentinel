@@ -442,21 +442,8 @@ pub async fn execute_pipeline_at(
         });
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // LAYER 5, Sandbox Execution (dry-run for high-risk)
-    // ═══════════════════════════════════════════════════════════════
-    let sandbox_json =
-        if sandbox_executor::should_sandbox(action_type_s, adaptive_result.total_score) {
-            let sb = sandbox_executor::sandbox_execute(
-                &input.action.tool_name,
-                action_type_s,
-                &payload_json,
-                adaptive_result.total_score,
-            );
-            serde_json::to_value(&sb).ok()
-        } else {
-            None
-        };
+    // LAYER 5, Sandbox Execution, used to sit here. It now runs after the
+    // composite score exists — see "LAYER 5, deferred" below for why.
 
     // ═══════════════════════════════════════════════════════════════
     // LAYER 6, Formal Policy Verification
@@ -743,6 +730,48 @@ pub async fn execute_pipeline_at(
         workspace_policy.threshold_block,
         workspace_policy.threshold_review,
     );
+
+    // ═══════════════════════════════════════════════════════════════
+    // LAYER 5, deferred: Sandbox Execution (dry-run for high-risk)
+    // ═══════════════════════════════════════════════════════════════
+    //
+    // This ran before the composite score existed and was therefore fed
+    // `adaptive_result.total_score`, while its thresholds (40 / 50 / 65) are on
+    // the composite's scale — the same scale as `threshold_review` 35 and
+    // `threshold_block` 70. The two scales do not overlap where it matters:
+    // measured across 42 actions the adaptive score spans 9..40 (mean 23.6)
+    // while the composite spans 2..84, so NOTHING reached any of the three
+    // thresholds and the layer produced a result 0 times out of 42 — including
+    // `curl | sh`, which scores 84 and blocks while charging adaptive 30. A
+    // containment layer that reports itself present and never runs is worse
+    // than one that is absent.
+    //
+    // Nothing between the old position and this one reads `sandbox_json`, and
+    // the layer is advisory — `sandbox_result` is not part of the signed
+    // receipt and feeds no term of the composite (tool_risk.rs weights adaptive,
+    // firewall, policy/behavioral, taint/threat-intel, secrets, plugins,
+    // pattern, session graph — there is no sandbox term). So this changes which
+    // actions carry a `sandboxResult` in the API response, and changes no
+    // verdict, score, reason or signed byte.
+    // ponytail: `payload_json` was moved into the plugin request above, back
+    // when this layer ran before it. Rather than downgrade that move to a clone
+    // on EVERY request, rebuild the value from `payload_str` — the string it was
+    // serialized from — inside the branch that actually sandboxes. The common
+    // path pays nothing; the rare one pays a single parse. `sandbox_execute`
+    // only does `.get("command")`-style lookups, so key order does not matter.
+    let sandbox_json = if sandbox_executor::should_sandbox(action_type_s, risk.score) {
+        let payload = serde_json::from_str::<serde_json::Value>(&payload_str)
+            .unwrap_or(serde_json::Value::Null);
+        let sb = sandbox_executor::sandbox_execute(
+            &input.action.tool_name,
+            action_type_s,
+            &payload,
+            risk.score,
+        );
+        serde_json::to_value(&sb).ok()
+    } else {
+        None
+    };
 
     // Build audit event
     let mut reasons = risk.reasons.clone();

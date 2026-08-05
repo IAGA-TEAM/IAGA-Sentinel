@@ -197,10 +197,15 @@ impl ReceiptStore for SqliteReceiptStore {
 
     async fn list_runs(&self, limit: u32) -> Result<Vec<RunSummary>> {
         let rows = sqlx::query(
+            // `last_ts` alone is not a total order: runs written in the same
+            // second tie, and the tie broke differently on every call (50 run_id
+            // positions moved between two identical measurement runs). `run_id`
+            // is unique per run, so it makes the ordering total and paging
+            // well-defined.
             "SELECT run_id, COUNT(*) as cnt, MIN(timestamp) as first_ts, \
                     MAX(timestamp) as last_ts \
              FROM receipts GROUP BY run_id \
-             ORDER BY last_ts DESC LIMIT ?",
+             ORDER BY last_ts DESC, run_id ASC LIMIT ?",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)

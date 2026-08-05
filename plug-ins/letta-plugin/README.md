@@ -1,7 +1,7 @@
 # IAGA Sentinel — plug-in for Letta
 
 Govern a [Letta](https://github.com/letta-ai/letta) agent's tool calls through a
-local [IAGA Sentinel](https://github.com/EdoardoBambini/IAGA-Sentinel) sidecar.
+local [IAGA Sentinel](https://github.com/IAGA-TEAM/IAGA-Sentinel) sidecar.
 Letta pauses a governed tool at its Human-in-the-Loop approval boundary; this plugin
 asks IAGA for an `allow` / `review` / `block` verdict and replies approve or deny.
 Every verdict becomes an Ed25519-signed receipt linked into a hash-chained append-log that

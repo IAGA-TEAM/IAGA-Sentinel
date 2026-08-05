@@ -27,9 +27,9 @@ Two kinds live here:
 Pull the pinned image and run it in open mode (no auth — for local dev/demos):
 
 ```bash
-docker pull ghcr.io/edoardobambini/iaga-sentinel:v1.8.1
+docker pull ghcr.io/iaga-team/iaga-sentinel:v2.0.1
 docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
-  ghcr.io/edoardobambini/iaga-sentinel:v1.8.1 serve --seed-demo
+  ghcr.io/iaga-team/iaga-sentinel:v2.0.1 serve --seed-demo
 ```
 
 The REST API and operator dashboard are now at <http://localhost:4010/>. (In

@@ -1,0 +1,42 @@
+# The Dockerfile reads only Cargo.toml, Cargo.lock, crates/, LICENSE and
+# THIRD_PARTY_NOTICES.md. Everything else is build context the daemon uploads and
+# then ignores — on a working tree that has been built and tested locally that is
+# several GB (target/ alone reaches 6-10 GB), which is the difference between a
+# fast build and one that looks hung.
+#
+# Deliberately NOT excluded, because the runtime stage copies them:
+#   LICENSE, THIRD_PARTY_NOTICES.md,
+#   crates/iaga-sentinel-core/iaga-sentinel.example.yaml,
+#   crates/iaga-sentinel-dictum/examples, crates/iaga-sentinel-core/examples/policies
+
+# Build output and dependency trees — the bulk of the context
+target/
+**/node_modules/
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/dist/
+
+# VCS
+.git/
+.github/
+
+# Local state that must never reach an image layer
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+chain.json
+.env
+**/.local/
+**/.live/
+keys/
+
+# Trees the build never reads
+docs/
+sdks/
+plug-ins/
+charts/
+deploy/
+scripts/

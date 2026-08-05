@@ -1,0 +1,149 @@
+# ponytail: prebuilt binaries on tag, nothing more. No cargo-dist, no installer
+# scripts, no crates.io. `docker.yml` already covers the containerised path; this
+# exists because getting `iaga` onto a developer's machine should not require a
+# Rust toolchain, and a download is the lowest-friction way to do it.
+#
+# This supersedes the `release` job that used to live in `ci.yml`, which attached
+# a single unversioned Linux binary and nothing else — no macOS, no Windows, no
+# checksums. That job was removed in the same change; running both would have
+# meant two `action-gh-release` calls racing on one tag.
+#
+# One archive format for every platform: `.tar.gz`. Windows 10+ ships bsdtar as
+# `tar.exe`, so an installer needs no unzip dependency and no per-OS branch.
+#
+# Asset names are load-bearing: they are `iaga-<version>-<target>.tar.gz`, and
+# anything that downloads them verifies against the single `SHA256SUMS` published
+# alongside. Renaming them breaks every such consumer.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (without the leading v), for a dry run before tagging'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install the aarch64 linker
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p iaga-sentinel-core -p iaga-sentinel-verify
+
+      - name: Resolve the version
+        id: v
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          # Both binaries at the archive root, no wrapping directory, so an
+          # installer extracts straight into its bin directory.
+          staging=$(mktemp -d)
+          ext=""
+          [ "${TARGET}" = "x86_64-pc-windows-msvc" ] && ext=".exe"
+          for bin in iaga iaga-verify; do
+            cp "target/${TARGET}/release/${bin}${ext}" "${staging}/"
+          done
+          cp LICENSE DISCLAIMER.md THIRD_PARTY_NOTICES.md "${staging}/"
+          archive="iaga-${VERSION}-${TARGET}.tar.gz"
+          tar -czf "${archive}" -C "${staging}" .
+          # A per-target checksum file; the publish job concatenates them so a
+          # consumer fetches exactly one SHA256SUMS.
+          if command -v sha256sum >/dev/null; then
+            sha256sum "${archive}" > "${archive}.sha256"
+          else
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+          fi
+          cat "${archive}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iaga-${{ matrix.target }}
+          path: |
+            iaga-*.tar.gz
+            iaga-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build a single SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          cat *.tar.gz.sha256 | sed 's| .*/| |' > SHA256SUMS
+          rm -f *.tar.gz.sha256
+          cat SHA256SUMS
+          # Five targets, so five lines. A short file means a build silently dropped.
+          test "$(wc -l < SHA256SUMS)" -eq 5
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true

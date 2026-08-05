@@ -7,7 +7,7 @@
 > [`adr/0010-oss-enterprise-boundary.md`](adr/0010-oss-enterprise-boundary.md).
 > Path references in this file (`community/...`) reflect pre-1.0
 > layout; current paths are `crates/iaga-sentinel-core/...`. The pipeline
-> described here is still **8 layers** in 1.x (two of them, sandbox and
+> described here is still **8 layers** in 2.x (two of them, sandbox and
 > formal-verify, are advisory and do not change the verdict); 1.0 added four
 > cross-cutting subsystems on top (supply chain attestation, blast radius,
 > behavioral baseline, counterparty trust).
@@ -82,6 +82,12 @@ as `pluginResults`.
 
 - estimates impact for risky actions
 - supports approval and rejection flows for pending sandboxed actions
+- **runs last, not fifth.** The list above is the conceptual order; since 2.0.1
+  this layer executes after the composite risk score exists, because its
+  thresholds are on the composite's scale and feeding it the adaptive score
+  meant it never fired at all. It is advisory either way: `sandboxResult` is not
+  part of the signed receipt and contributes no term to the composite, so its
+  position cannot change a verdict.
 
 ### Layer 6 - Policy Engine
 
@@ -224,8 +230,17 @@ The SDK layer is also checked with:
 These are the main remaining community architecture gaps:
 
 - fully closed restart hydration and background sync for durable state
-- enhanced CLI roadmap commands (`watch`, `replay`, `benchmark`, `policy-test`)
+- enhanced CLI roadmap commands (`watch`, `benchmark`). `replay` and
+  `policy test` were on this list and have shipped; see the CLI reference in
+  [`AGENTS.md`](../AGENTS.md) §10.
 - richer typed SDK response models for some endpoints
+- **session state is process-global, not partitioned by workspace.** `SESSIONS`
+  and `SESSION_TAINTS` are keyed by `sessionId` with a fallback to `agent_id`, so
+  two workspaces sharing a process and a session key share the accumulated label
+  set. Each verdict is still evaluated with its own workspace's policy; what is
+  not partitioned is the history those checks read.
+- **a `GET` to an allow-listed host can carry data in its query string.** The
+  `secret` taint and response-side scanning cover part of that, not all of it.
 
 ## Dashboard
 

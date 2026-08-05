@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IAGA Sentinel API
-  version: 2.0.0
+  version: 2.0.1
   description: >
     IAGA Sentinel is the EU AI Act conformity evidence layer for AI agents.
     It intercepts tool calls, evaluates risk against typed policies, and
@@ -20,7 +20,7 @@ info:
     url: https://spdx.org/licenses/BUSL-1.1.html
   contact:
     name: IAGA Sentinel Team
-    url: https://github.com/EdoardoBambini/IAGA-Sentinel
+    url: https://github.com/IAGA-TEAM/IAGA-Sentinel
 
 servers:
   - url: http://localhost:4010
@@ -2688,89 +2688,111 @@ components:
           minimum: 0
 
     # ── Response Scanning ──
+    ResponseDecision:
+      type: string
+      enum: [allow, review, block]
+      description: >
+        Verdict on a tool response, from a single blended risk score:
+        `block` at 80 or above, `review` at 40 to 79, `allow` below 40.
+
     ResponseScanRequest:
       type: object
-      required: [text]
+      required: [requestId, agentId, toolName, responsePayload]
       properties:
-        text:
+        requestId:
           type: string
-          description: Agent response text to scan for sensitive data
+          description: Caller-chosen correlation id, echoed back in the result
         agentId:
           type: string
-          description: Optional agent ID for attribution
+          description: Agent the response is attributed to
+        toolName:
+          type: string
+          description: Tool that produced the response
+        responsePayload:
+          description: The tool response to scan (any JSON value)
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Optional; `sessionId` is the only key the server reads
 
     ResponseScanResult:
       type: object
+      required: [requestId, decision, riskScore, findings]
       properties:
-        clean:
-          type: boolean
-          description: True if no sensitive data was detected
+        requestId:
+          type: string
+        decision:
+          $ref: "#/components/schemas/ResponseDecision"
+        riskScore:
+          type: integer
+          minimum: 0
+          maximum: 100
         findings:
           type: array
           items:
-            type: object
-            properties:
-              patternName:
-                type: string
-              category:
-                type: string
-                enum: [pii, credential, secret, internal_path, custom]
-              matchCount:
-                type: integer
-              severity:
-                type: string
-                enum: [low, medium, high, critical]
+            type: string
+          description: Human-readable findings, one line per detection
+        redactedPayload:
+          description: >
+            Present only when sensitive patterns matched; each match is replaced
+            by a redaction marker.
 
     SensitivePattern:
       type: object
+      required: [name, description, category]
       properties:
         name:
           type: string
           description: Human-readable pattern name
-        category:
-          type: string
-          enum: [pii, credential, secret, internal_path, custom]
         description:
           type: string
-        enabled:
-          type: boolean
+        category:
+          type: string
+          enum: [pii, financial, credential]
 
     # ── Rate Limiting ──
     RateLimitStatus:
       type: object
+      required: [agentId, requestsLastMinute, requestsLastHour, requestsLast5Seconds, config]
       properties:
         agentId:
           type: string
-        allowed:
-          type: boolean
-          description: Whether the agent is currently within rate limits
-        remaining:
+        requestsLastMinute:
           type: integer
-          description: Remaining requests in the current window
-        limit:
+          description: >
+            Requests recorded in the last 60 seconds, as the maximum over the
+            agent's per-tool windows. The limit is enforced per agent and tool,
+            so this is the number comparable to `config.maxPerMinute`: when they
+            are equal, the next call on that tool is refused.
+        requestsLastHour:
           type: integer
-          description: Maximum requests per window
-        resetAt:
-          type: string
-          format: date-time
-          description: When the current rate limit window resets
+          description: Same, over the last hour, comparable to `config.maxPerHour`.
+        requestsLast5Seconds:
+          type: integer
+          description: Same, over the burst window, comparable to `config.burstLimit`.
+        config:
+          $ref: "#/components/schemas/RateLimitConfig"
 
     RateLimitConfig:
       type: object
+      required: [maxPerMinute, maxPerHour, burstLimit]
+      description: >
+        The global rate-limit configuration. All three fields are required —
+        they carry no server-side default on deserialization, so a body missing
+        any of them is rejected with 422. Limits are enforced per agent and tool.
       properties:
-        requestsPerSecond:
-          type: number
-          format: float
-          description: Maximum sustained requests per second
-        burstSize:
+        maxPerMinute:
           type: integer
-          description: Maximum burst size above sustained rate
-        windowSeconds:
+          minimum: 0
+          description: Requests allowed per agent and tool in a 60-second sliding window (default 60)
+        maxPerHour:
           type: integer
-          description: Sliding window duration in seconds
-        cooldownSeconds:
+          minimum: 0
+          description: Requests allowed per agent and tool in a one-hour sliding window (default 1000)
+        burstLimit:
           type: integer
-          description: Cooldown period after limit is exceeded
+          minimum: 0
+          description: Requests allowed per agent and tool in a 5-second sliding window (default 10)
 
     # ── Agent Fingerprinting ──
     AgentFingerprint:

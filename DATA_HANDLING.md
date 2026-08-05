@@ -34,7 +34,7 @@ stable order; fields that are empty or absent are omitted from the JSON.
 | `seq` | integer | always | Position in the chain, starting at 0 and incrementing by 1. |
 | `parent_hash` | string or null | always | SHA-256 of the previous receipt body, `null` at `seq` 0. |
 | `input_hash` | string | always | SHA-256 binding the action content: the agent id, the tool name, and a SHA-256 digest of the canonical payload. The raw payload itself is never included (see below). |
-| `policy_hash` | string | always | SHA-256 of the compiled policy bundle (or a default placeholder when no Dictum overlay is loaded). |
+| `policy_hash` | string | always | SHA-256 binding the policy that produced the verdict. With a Dictum overlay loaded it digests the compiled bundle; without one it digests the resolved workspace policy (id, protocols, allowed domains, tools with their action types and max decisions, and the block/review thresholds), stable under reordering of any of those lists. |
 | `verdict` | enum | always | `allow`, `review`, or `block`. |
 | `reasons` | string array | usually | Short machine reasons for the verdict; omitted when empty. |
 | `risk_score` | integer | always | Numeric risk for the decision. |
@@ -53,7 +53,10 @@ stable order; fields that are empty or absent are omitted from the JSON.
 id, the tool name, and a SHA-256 digest of the canonical request payload, so it is bound to
 the action's content (`rm -rf /` and `ls` produce different hashes) while the receipt still
 does not carry the request body or its arguments, only the digest. `policy_hash` is likewise
-a digest of the compiled policy, not the policy text.
+a digest of the policy that governed the action, not the policy text. An auditor recomputing
+it needs the same input the engine used: the compiled Dictum bundle when an overlay is
+loaded, and otherwise the canonicalized resolved workspace policy — not the YAML file as
+written, which may list the same tools and domains in a different order.
 
 A real default receipt, exported with `iaga replay <run_id> --export chain.json`, looks
 like this. Note the absence of any raw command, path, or argument:
@@ -115,6 +118,12 @@ There is no managed IAGA backend and no cloud component. The tables created hold
 events, the human-review queue, agent profiles and workspace policies, API key hashes (the
 hash, not the raw key), non-human-identity records, session graphs, taint sessions,
 behavioral fingerprints, rate-limit configuration, and the signed receipts.
+
+`agent_profiles.tool_trust` (migration `0006`, both backends) stores the per-agent trust
+weight the risk scorer reads, defaulting to `0.7`. It is operator configuration, not agent
+data: `iaga export` round-trips it in `iaga-sentinel.yaml`, and `GET /v1/profiles/{id}`
+returns it. Before 2.0.1 the column did not exist and both row mappers returned a literal
+`0.7`, so a configured value was accepted and silently ignored.
 
 The audit store records decision metadata per verdict (`StoredAuditEvent` in
 `crates/iaga-sentinel-core/src/core/types.rs`): event id, agent id, optional tenant id,

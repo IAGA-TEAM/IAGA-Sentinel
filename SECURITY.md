@@ -4,7 +4,12 @@
 
 | Version | Supported |
 |---------|-----------|
-| 1.7.x   | Yes       |
+| 2.0.x   | Yes       |
+
+Older lines are not patched. Receipts produced by any earlier release keep
+verifying — the receipt schema has not changed since 1.3.0, and the offline
+verifiers accept every chain they ever produced — so upgrading does not
+invalidate evidence you have already exported.
 
 ## Reporting a Vulnerability
 
