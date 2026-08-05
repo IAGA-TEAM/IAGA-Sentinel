@@ -263,7 +263,7 @@ not describe it as a "gateway."
 ## 2. Repository layout
 
 ```
-agent-armor/                      # repo root (project name: IAGA Sentinel)
+iaga-sentinel/                      # repo root (project name: IAGA Sentinel)
 ├── Cargo.toml                    # workspace root (9 crates), version 2.0.1, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
 ├── Dockerfile                    # 2-stage build -> ghcr.io/iaga-team/iaga-sentinel
