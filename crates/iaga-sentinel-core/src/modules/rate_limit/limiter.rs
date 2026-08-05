@@ -255,12 +255,21 @@ mod tests {
     /// because whether `Instant::now()` is within an hour of its epoch is a
     /// property of the host, not of the test — which is exactly why the three
     /// end-to-end rate-limiter tests read as flaky for so long. So this drives
-    /// the same branch from the other side: a window longer than any uptime
-    /// makes `checked_sub` return `None` on every machine, at every uptime.
+    /// the same branch from the other side: a window so long that its start is
+    /// before any instant that can exist.
     ///
-    /// The window in that case reaches back past the epoch, so it contains
-    /// every instant that exists and the answer must be `true`. The old
-    /// `unwrap_or(now)` answered `false`, which emptied every window.
+    /// Whichever way the platform represents that, the ANSWER must be `true` —
+    /// the window contains every timestamp — and the old `unwrap_or(now)`
+    /// answered `false`, which emptied every window. The assertion is therefore
+    /// on the answer, not on how the platform gets there.
+    ///
+    /// An earlier version asserted `checked_sub(..).is_none()` as a
+    /// precondition, and that is a *Windows* fact, not a portable one: there
+    /// `Instant` counts from boot and cannot go negative, while on Linux it is a
+    /// signed `timespec` that happily represents a point before the epoch, so
+    /// `checked_sub` returns `Some` and the precondition failed in CI. The bug
+    /// this test exists for is caught on both, because both make the old code
+    /// answer `false`.
     #[test]
     fn a_window_reaching_past_the_epoch_contains_every_timestamp() {
         let now = Instant::now();
@@ -269,17 +278,12 @@ mod tests {
         // Windows, which made the first version of this test pass against the
         // very semantics it exists to reject.
         let earlier = now - Duration::from_secs(1);
-        let unrepresentable = Duration::from_secs(u64::MAX / 2);
 
         assert!(
-            now.checked_sub(unrepresentable).is_none(),
-            "precondition: this window must be unrepresentable for the test to \
-             exercise the None branch"
-        );
-        assert!(
-            within_window(now, unrepresentable, earlier),
-            "a window that starts before the epoch must contain a timestamp \
-             recorded before now; returning false here disables the limiter"
+            within_window(now, Duration::MAX, earlier),
+            "a window reaching back before any representable instant must \
+             contain a timestamp recorded before now; returning false here \
+             disables the limiter"
         );
     }
 
