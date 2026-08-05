@@ -29,10 +29,27 @@ jobs:
           push: true
           # ghcr.io requires a lowercase image name; hardcoded so it never
           # depends on the repo owner's casing. ref_name on a tag push is e.g. v1.6.0.
-          # The namespace must match the repo that owns the tag: GITHUB_TOKEN
-          # carries packages:write for THIS repository's org, so publishing under
-          # a personal namespace 403s. Tags published before 1.9.0 under
-          # ghcr.io/edoardobambini/iaga-sentinel still resolve.
+          #
+          # STATE OF THIS, MEASURED ON 2026-08-05 RATHER THAN ASSUMED. The comment
+          # that used to sit here claimed CI had published to `ghcr.io/iaga-team`
+          # since 1.9.0. It has not: the organisation has **no packages at all**,
+          # and the only published image is `ghcr.io/edoardobambini/iaga-sentinel`,
+          # last updated 2026-06-16 (the 1.6 line). On the v2.0.1 tag this step
+          # uploaded every layer and then failed the manifest with HTTP 403.
+          #
+          # A 403 at manifest time, after the blobs went through, is a permission
+          # to *own the package*, not a permission to write blobs. `permissions:
+          # packages: write` above is already set, so the remaining causes are
+          # organisation-side and cannot be fixed from this file:
+          #   * Org Settings -> Packages -> package creation may be disabled, so
+          #     GITHUB_TOKEN cannot create a package that does not exist yet.
+          #   * Org Settings -> Actions -> Workflow permissions may cap what a
+          #     workflow token can request.
+          # Once the package exists, its own "Manage Actions access" list must
+          # include this repository with the Write role.
+          #
+          # Until that is settled, no `ghcr.io/iaga-team/...` tag resolves, so do
+          # not point users at one.
           tags: |
             ghcr.io/iaga-team/iaga-sentinel:${{ github.ref_name }}
             ghcr.io/iaga-team/iaga-sentinel:latest
