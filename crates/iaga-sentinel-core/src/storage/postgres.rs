@@ -313,7 +313,7 @@ impl AuditStore for PostgresStorage {
                 }
             }
             let mut top_tools: Vec<(String, u64)> = tool_counts.into_iter().collect();
-            top_tools.sort_by(|a, b| b.1.cmp(&a.1));
+            top_tools.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
             top_tools.truncate(5);
 
             let trust = crate::modules::nhi::crypto_identity::get_agent_trust(&aid);
