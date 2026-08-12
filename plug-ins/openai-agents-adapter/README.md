@@ -16,13 +16,14 @@ sidecar unreachable → fail-open by default (`fail_closed=True` to deny).
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/openai-agents/openai-agents.policy.yaml
+./target/release/iaga import plug-ins/openai-agents-adapter/openai-agents.policy.yaml
 ```
 
 The guardrail reports the tool's qualified name (e.g. `filesystem_read`); the
@@ -32,7 +33,7 @@ The guardrail reports the tool's qualified name (e.g. `filesystem_read`); the
 
 ```bash
 pip install openai-agents iaga-sentinel
-python examples/integrations/openai-agents/python_example.py
+python plug-ins/openai-agents-adapter/python_example.py
 ```
 
 A dangerous tool call (e.g. a `shell` with `curl … | sh`) is blocked by the

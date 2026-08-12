@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import httpx
 
+from .._payload import _safe_value, named_payload
 from ..client import SentinelClient, AsyncSentinelClient
 from ..types import (
     ActionDetail,
@@ -31,6 +31,14 @@ class AdapterConfig:
     session_id: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
     fail_closed: bool = False
+    #: Tool name -> action type, for tools whose name the heuristic below cannot
+    #: read. A framework only ever hands the adapter a name, so without this the
+    #: guess is final: most real tool names (`search_docs`, `lookup_customer`,
+    #: `get_weather`) resolve to `custom`, which no shipped example policy
+    #: allows. Declaring the narrow type here is the alternative to widening the
+    #: policy to `custom`, and it is the better one — `custom` is the least
+    #: specific thing you can tell the policy engine about a tool.
+    action_types: Optional[Mapping[str, ActionType]] = None
 
 
 def build_request(
@@ -71,6 +79,26 @@ def serialize_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, A
     payload: dict[str, Any] = {"args": list(args)}
     payload.update(kwargs)
     return payload
+
+
+def resolve_action_type(
+    config: AdapterConfig,
+    tool_name: str,
+    default: Optional[ActionType] = None,
+) -> ActionType:
+    """The action type to report for `tool_name`: declared first, then `default`,
+    then the name heuristic.
+
+    EVERY adapter routes through here, so one `action_types={...}` covers
+    whichever entry point the framework happens to call. `default` exists for
+    the adapters that already knew the answer without guessing — the OpenAI
+    wrapper only ever emits two tool names and both really are http — so they
+    can honour a declaration without their undeclared behaviour changing.
+    """
+    declared = (config.action_types or {}).get(tool_name)
+    if declared is not None:
+        return declared
+    return default if default is not None else infer_action_type(tool_name)
 
 
 def infer_action_type(tool_name: str, default: ActionType = ActionType.CUSTOM) -> ActionType:
@@ -169,41 +197,6 @@ async def run_guarded_async(
     return await call()
 
 
-def _safe_value(val: Any) -> Any:
-    if isinstance(val, (str, int, float, bool, type(None))):
-        return val
-    if isinstance(val, (list, tuple)):
-        return [_safe_value(v) for v in val]
-    if isinstance(val, dict):
-        return {str(k): _safe_value(v) for k, v in val.items()}
-    return str(val)
-
-
-def named_payload(
-    func: Callable,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    *,
-    exclude: tuple[str, ...] = ("self", "ctx", "context"),
-) -> dict[str, Any]:
-    """Build a payload from a function's named arguments, skipping ``exclude``."""
-    try:
-        params = list(inspect.signature(func).parameters.keys())
-    except (TypeError, ValueError):
-        params = []
-    payload: dict[str, Any] = {}
-    for i, arg in enumerate(args):
-        name = params[i] if i < len(params) else f"arg{i}"
-        if name in exclude:
-            continue
-        payload[name] = _safe_value(arg)
-    for key, value in kwargs.items():
-        if key in exclude:
-            continue
-        payload[key] = _safe_value(value)
-    return payload
-
-
 def governed_callable(
     config: AdapterConfig,
     func: Callable,
@@ -219,7 +212,7 @@ def governed_callable(
     follow the fail-open/closed policy on ``config``.
     """
     name = tool_name or getattr(func, "__name__", "tool")
-    resolved_type = action_type or infer_action_type(name)
+    resolved_type = action_type or resolve_action_type(config, name)
 
     if asyncio.iscoroutinefunction(func):
 

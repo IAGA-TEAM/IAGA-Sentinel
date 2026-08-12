@@ -1,5 +1,5 @@
 # Registers the "openai-agents-demo" agent.
-#   iaga import examples/integrations/openai-agents/openai-agents.policy.yaml
+#   iaga import plug-ins/openai-agents-adapter/openai-agents.policy.yaml
 # The guardrail reports the tool's qualified name (e.g. "filesystem_read"); the
 # governed_tool wrapper uses the tool_name you pass (here "shell").
 profiles:

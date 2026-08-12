@@ -28,6 +28,12 @@ pub fn workspace_policy_hash(policy: &WorkspacePolicy) -> String {
     p.tools.sort_by(|a, b| a.tool_name.cmp(&b.tool_name));
     for t in &mut p.tools {
         t.allowed_action_types.sort_by_key(|a| format!("{a:?}"));
+        // Order-insensitive like the other lists: `destination_fields` is a
+        // priority order for extraction, but two policies listing the same keys
+        // govern identically and must hash identically. Note this list is
+        // `skip_serializing_if = "Vec::is_empty"`, so a policy that never
+        // declared one still hashes exactly as it did before the field existed.
+        t.destination_fields.sort();
     }
     // Cannot fail: WorkspacePolicy is a plain struct with no maps.
     let bytes = serde_json::to_vec(&p).expect("WorkspacePolicy serializes");
@@ -52,12 +58,14 @@ mod tests {
                     allowed_action_types: vec![ActionType::FileRead],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "http.fetch".into(),
                     allowed_action_types: vec![ActionType::Http],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
             ],
             allowed_domains: vec!["api.github.com".into(), "hooks.slack.com".into()],
@@ -78,6 +86,33 @@ mod tests {
             hex::encode(hasher.finalize())
         };
         assert_ne!(h, placeholder);
+    }
+
+    /// Adding `destination_fields` to `ToolPolicy` must not re-hash policies
+    /// that do not use it.
+    ///
+    /// This digest is bound into every signed receipt, so a field that
+    /// serialized unconditionally would have silently invalidated the tie
+    /// between every already-issued receipt and the policy it names — a
+    /// migration nobody asked for, caused by adding an empty vector. The
+    /// `skip_serializing_if = "Vec::is_empty"` attribute is what prevents it,
+    /// and this test is what stops the attribute being dropped.
+    #[test]
+    fn an_undeclared_destination_field_does_not_appear_in_the_hashed_bytes() {
+        let p = policy();
+        assert!(p.tools.iter().all(|t| t.destination_fields.is_empty()));
+        let bytes = serde_json::to_string(&p).expect("serializes");
+        assert!(
+            !bytes.contains("destinationFields"),
+            "an empty destination_fields reached the hashed bytes, which \
+             re-hashes every workspace that never adopted the field: {bytes}"
+        );
+
+        // And declaring one DOES move the hash — the field is inert only while
+        // unused, not always.
+        let mut declared = policy();
+        declared.tools[0].destination_fields = vec!["target".into()];
+        assert_ne!(workspace_policy_hash(&p), workspace_policy_hash(&declared));
     }
 
     #[test]

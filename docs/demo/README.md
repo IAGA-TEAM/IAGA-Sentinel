@@ -57,7 +57,7 @@ then proven offline with `iaga-verify`. Same verdicts every run.
 **Pane A - start the server (foreground, logs visible):**
 
 ```powershell
-cd C:\Users\monti\Desktop\agent-armor
+cd path\to\IAGA-Sentinel
 .\scripts\demo.ps1
 ```
 
@@ -65,13 +65,13 @@ Wait for the green **READY** banner and the `DASHBOARD -> http://localhost:4010/
 line. (First run: add `-Build` to force the release build.)
 
 **Browser:** open `http://localhost:4010/`, click the **Live feed** tab, and
-leave it visible. (Optional: open a second browser tab on the **Evidence**
-/ Signed receipts view for the finale.)
+leave it visible. (Optional: open a second browser tab on the **Receipts**
+view — the signed receipts — for the finale.)
 
 **Pane B - run the live driver:**
 
 ```powershell
-cd C:\Users\monti\Desktop\agent-armor
+cd path\to\IAGA-Sentinel
 .\scripts\demo_run.ps1
 ```
 
@@ -87,15 +87,15 @@ appear in the dashboard Live feed.
 | 8-20  | **Beat 1** banner, ALLOW (green); a green row appears in Live feed | "A safe repository read. Low risk. Allowed - and recorded." |
 | 20-40 | **Beat 2** banner, REVIEW (amber); amber row in Live feed; `reviewRequestId` printed | "A shell command needs a production secret. Sentinel holds it for human review." |
 | 40-58 | **Beat 3** banner, BLOCK (red); red row in Live feed | "`rm -rf` on the database. Sentinel returns a block verdict and signs the receipt that proves it." |
-| 58-62 | Cut to the terminal; optionally click the **Evidence** tab | "Three verdicts. Now the proof." |
-| 62-85 | `iaga replay --export`, then `iaga-verify` (embedded), then `--key` (pinned, clean) | "Export the signed chain. Verify it offline - no server, no database, just this file and a public key. CHAIN OK. The final receipt attests the Block." |
+| 58-62 | Cut to the terminal; optionally click the **Receipts** tab | "Three verdicts. Now the proof." |
+| 62-85 | `iaga replay --export`, then `iaga-verify` (embedded), then `--key … --expect-count 3` | "Export the signed chain. Verify it offline - no server, no database, just this file and a public key. CHAIN OK, and it is the chain we drove: three receipts, no more." |
 | 85-95 | Final green **CHAIN OK** banner | "Deterministic. Tamper-evident. Cryptographic evidence." |
 
 ### What to point at in the dashboard
 
 - **Live feed** - one row per verdict as it happens (decision badge, agent, tool,
   risk score). This is the hero panel during beats 1-3.
-- **Evidence** / Signed receipts - show it after the Block to tie the on-screen
+- **Receipts** - the signed receipts; show it after the Block to tie the on-screen
   verdicts to durable signed receipts.
 - (Optional) **Audit** - the audit explorer, if you want to show the recorded
   event detail.
@@ -117,13 +117,26 @@ Remove-Item .\iaga_sentinel.db,.\iaga_sentinel.db-wal,.\iaga_sentinel.db-shm,.\c
 
 > **Stop the server first, and start a new one afterwards — deleting the database
 > is not enough.** The session graph lives in the process, not in the database, so
-> a server that stays up keeps every node the previous take added. Measured: a
-> second run of the driver against the same live server returns **REVIEW risk 35**
-> on beat 1 instead of ALLOW, with the reason
-> `session graph attack: privilege_escalation_chain` — the two takes share one
-> `sessionId`, so together they read as `shell -> file_read -> shell`. The driver
-> then correctly refuses the take. That is the system working; it is not a flaky
-> verdict, and it is why the relaunch path above exists.
+> a server that stays up keeps every node the previous take added. Two distinct
+> things go wrong, one take apart, and only the second one is loud:
+>
+> - **Second run against the same live server — the dangerous one.** Measured: all
+>   three verdicts are still ALLOW 2 / REVIEW 40 / BLOCK 81, so every verdict
+>   assertion passes. Beats 2 and 3 pick up an extra reason
+>   `session graph attack: privilege_escalation_chain` without changing the
+>   verdict. But the run_id is `<agentId>:<sessionId>` and the `sessionId` is
+>   fixed, so the second take **chains onto the first**: `iaga replay --export`
+>   comes back with **6 receipts**, not 3, and `iaga-verify` still prints
+>   `CHAIN OK` — a longer valid chain verifies exactly like a correct one. That
+>   is why the driver anchors the offline proof with
+>   `iaga-verify --key <pub> --expect-count 3`: the count is the only thing that
+>   distinguishes the chain you drove from the chain that accumulated. Without it
+>   the take ends on a green `CHAIN OK` over the wrong chain.
+> - **Third run.** Beat 1 finally flips to **REVIEW risk 35** with
+>   `session graph attack: privilege_escalation_chain`, and the verdict assertion
+>   refuses the take. That is the system working; it is not a flaky verdict.
+>
+> Both are why the relaunch path above exists.
 
 > Keep `%USERPROFILE%\.iaga-sentinel\keys\receipt_signer.ed25519` so the pinned
 > public key stays identical across takes.
@@ -171,5 +184,13 @@ rm -f iaga_sentinel.db iaga_sentinel.db-wal iaga_sentinel.db-shm chain.json
 ```
 
 Same flow as Windows: reset weights, drive three beats with a fixed `sessionId`,
-assert each verdict, then `iaga replay --export` + `iaga-verify` (embedded and
-`--key` pinned).
+assert each verdict, then `iaga replay --export` + `iaga-verify` (embedded, then
+with the key stated and `--expect-count`).
+
+> **What the second `iaga-verify` call proves, and what it does not.** Both
+> drivers read the key out of `chain.json` itself, so passing it back with
+> `--key` only silences the self-asserted warning — it cannot authenticate
+> authorship, because anyone who re-signed the chain would have supplied their
+> own key there too. To authenticate authorship, pin a key you obtained out of
+> band. `--expect-count` IS an external anchor: it comes from what the driver
+> drove, not from the file, which is why it catches a chain that grew.

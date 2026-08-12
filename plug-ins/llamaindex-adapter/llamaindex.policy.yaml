@@ -1,5 +1,5 @@
 # Registers the "llamaindex-demo" agent.
-#   iaga import examples/integrations/llamaindex/llamaindex.policy.yaml
+#   iaga import plug-ins/llamaindex-adapter/llamaindex.policy.yaml
 profiles:
   - agentId: llamaindex-demo
     workspaceId: ws-llamaindex

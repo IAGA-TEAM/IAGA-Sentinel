@@ -1,15 +1,15 @@
 """Govern an OpenAI client's tool/LLM calls with IAGA Sentinel.
 
     pip install openai iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then:
     # set OPENAI_API_KEY in your shell, then:
-    python examples/integrations/openai/python_example.py
+    python plug-ins/openai-adapter/python_example.py
 
 `sentinel_wrap_openai` returns a drop-in proxy of your OpenAI client: every
 `chat.completions.create` / `responses.create` is inspected through IAGA before
-the request is sent. allow -> sends; block/review -> SentinelBlockedError /
-PermissionError (a dangerous prompt is blocked by the firewall before any spend).
+the request is sent. allow -> sends; block/review -> both raise PermissionError
+(a dangerous prompt is blocked by the firewall before any spend).
 """
 from openai import OpenAI
 

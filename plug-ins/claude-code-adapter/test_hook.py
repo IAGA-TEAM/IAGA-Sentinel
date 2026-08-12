@@ -2,8 +2,8 @@
 
 Run against a live sidecar seeded with demo data:
 
-    IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo
-    pytest examples/integrations/claude-code/test_hook.py -v
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo
+    pytest plug-ins/claude-code-adapter/test_hook.py -v
 
 Tests that need the server skip automatically when it is unreachable. The
 fail-open / fail-closed tests point at a dead port and always run.

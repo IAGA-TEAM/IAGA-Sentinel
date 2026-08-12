@@ -40,6 +40,13 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `postgres` is NOT a default feature, so the step above never compiles
+      # `storage/postgres.rs` and that file went unlinted through the release
+      # that shipped the INTEGER-decoded-as-i64 bug. Linting it is cheap; not
+      # linting half the storage layer is how a whole backend goes unchecked.
+      - name: Run clippy (postgres feature)
+        run: cargo clippy -p iaga-sentinel-core --features postgres --all-targets -- -D warnings
+
       - name: Security audit
         # Ignores live in .cargo/audit.toml (repo root, auto-discovered) —
         # single source of truth, no duplicated CLI flags (1.5.2).
@@ -57,12 +64,29 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Lint
-        run: helm lint charts/iaga-sentinel
+        run: helm lint charts/iaga-sentinel --set image.tag=ci-render
+
+      # Through 2.0.1 `image.tag` defaulted to the product version, so a plain
+      # `helm install` rendered a valid-looking reference to an image that has
+      # never been published and the first sign of trouble was ImagePullBackOff.
+      # The render must now refuse, and refuse with a message that says what to
+      # do — every step below therefore passes an explicit tag.
+      - name: A render with no image.tag is refused, readably
+        run: |
+          set -uo pipefail
+          err="$(helm template t charts/iaga-sentinel 2>&1)" && {
+            echo "::error::the chart rendered with no image.tag; a default install would ImagePullBackOff"
+            exit 1
+          }
+          echo "$err" | grep -q 'image.tag is required' || {
+            echo "::error::the chart refused without saying image.tag is required: $err"
+            exit 1
+          }
 
       - name: Default install does not shadow the image's policy
         run: |
           set -euo pipefail
-          out="$(helm template t charts/iaga-sentinel)"
+          out="$(helm template t charts/iaga-sentinel --set image.tag=ci-render)"
           echo "$out" | grep -q 'subPath: iaga-sentinel.yaml' \
             && { echo "::error::default values mount an empty policy over the image's"; exit 1; } || true
           echo "$out" | grep -q 'livenessProbe' \
@@ -73,7 +97,7 @@ jobs:
       - name: An existingSecret without a signer key renders no dangling subPath
         run: |
           set -euo pipefail
-          out="$(helm template t charts/iaga-sentinel --set secrets.existingSecret=byo)"
+          out="$(helm template t charts/iaga-sentinel --set image.tag=ci-render --set secrets.existingSecret=byo)"
           if echo "$out" | grep -q 'subPath: receipt-signer-key'; then
             echo "::error::signer-key subPath rendered with no guaranteed Secret entry; the pod would hang in CreateContainerConfigError"
             exit 1
@@ -82,7 +106,7 @@ jobs:
       - name: A supplied policy is mounted
         run: |
           set -euo pipefail
-          helm template t charts/iaga-sentinel \
+          helm template t charts/iaga-sentinel --set image.tag=ci-render \
             --set-file policy.config=crates/iaga-sentinel-core/iaga-sentinel.example.yaml \
             | grep -q 'subPath: iaga-sentinel.yaml' \
             || { echo "::error::a supplied policy was not mounted"; exit 1; }
@@ -91,7 +115,7 @@ jobs:
         run: |
           set -euo pipefail
           hex="$(printf 'a%.0s' $(seq 1 64))"
-          if helm template t charts/iaga-sentinel --set secrets.receiptSignerKey="$hex" >/dev/null 2>&1; then
+          if helm template t charts/iaga-sentinel --set image.tag=ci-render --set secrets.receiptSignerKey="$hex" >/dev/null 2>&1; then
             echo "::error::a 64-char hex key must be refused: it is valid base64 and would decode to 48 bytes, disabling receipts"
             exit 1
           fi

@@ -2,7 +2,7 @@
 
 Drive the real governance sidecar. Start it first:
 
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 
 The engine keeps per-agent behavioral state: an agent that issues many calls
 (or any blocked call) accumulates risk and is eventually escalated to

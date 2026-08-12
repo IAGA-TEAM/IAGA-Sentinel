@@ -98,10 +98,21 @@ policy "never_destroy_production_data" {
 // "Never send raw credentials to a host we haven't approved."
 // NOTE: secret_ref() detects RAW credential material (AWS keys, PEM blocks),
 // NOT secretref:// references. See AGENTS.md secret_ref vs secretref://.
+//
+// ORDER MATTERS: secret_ref() comes FIRST on purpose.
+// url_host() reads `destination` and only `destination`; on a payload naming its
+// target url/uri/endpoint/href/target/webhook it ERRORS, and an erroring `when`
+// on a block rule fires FAIL-CLOSED (reason `dictum-eval-error`). `and`
+// short-circuits, so testing for a credential first means an ordinary call with
+// no secret never reaches url_host() and is not refused for a rule it does not
+// violate. A payload that DOES carry a secret still evaluates url_host(), so an
+// alias there still fails closed -- the protection is unchanged, the false
+// refusal is gone. Host-check the other key names on the WORKSPACE policy
+// (destinationFields on the tool), which applies the allowlist to all of them.
 policy "no_secret_egress_off_allowlist" {
   when action.kind == "http"
-   and url_host(action.payload.destination) not in workspace.allowlist
    and secret_ref(action.payload)
+   and url_host(action.payload.destination) not in workspace.allowlist
   then block, reason="credentials must not leave approved hosts",
        evidence=action.payload.destination
 }
@@ -130,6 +141,9 @@ Write-Host '> iaga policy lint / check' -ForegroundColor Cyan
 & $IagaExe policy check $PolicyFile;  if ($LASTEXITCODE -ne 0) { throw "policy check failed" }
 
 # 4. Serve with the overlay on the shared DB.
+# Bind to loopback explicitly: open mode makes every unauthenticated caller
+# an implicit ADMIN, and the server's own default host is 0.0.0.0.
+$env:IAGA_SENTINEL_HOST      = '127.0.0.1'
 $env:IAGA_SENTINEL_OPEN_MODE = 'true'
 $env:DATABASE_URL            = $DbUrl
 Write-Host ''

@@ -31,6 +31,11 @@ fi
 # Reset the demo DB for an identical seeded state every run.
 rm -f iaga_sentinel.db iaga_sentinel.db-wal iaga_sentinel.db-shm
 
+# Open mode makes every unauthenticated caller an implicit ADMIN while no
+# API key exists, and the server's own default bind host is 0.0.0.0 - so
+# without this the script publishes an admin API to the whole LAN. Every
+# probe below already talks to 127.0.0.1.
+export IAGA_SENTINEL_HOST=127.0.0.1
 export IAGA_SENTINEL_OPEN_MODE=true CARGO_INCREMENTAL=0 PORT="$PORT"
 
 "$IAGA" serve --seed-demo &
@@ -41,6 +46,15 @@ for _ in $(seq 1 60); do
   if curl -fsS "$HEALTH" >/dev/null 2>&1; then break; fi
   sleep 0.5
 done
+
+# The loop above exits after its attempts whether or not the server ever
+# answered. Without this check the script printed READY and then blocked in
+# `wait`, so a server that failed to start looked exactly like one that
+# worked. agent_bootstrap.sh already does this; demo.ps1 exits 1 here.
+curl -fsS "$HEALTH" >/dev/null 2>&1 || {
+  echo "server did not become healthy on $HEALTH" >&2
+  exit 1
+}
 
 echo ""
 echo "READY -> http://localhost:$PORT/"

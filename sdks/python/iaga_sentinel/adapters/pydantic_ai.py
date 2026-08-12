@@ -14,7 +14,7 @@ See plug-ins/pydantic-ai-adapter/ for a runnable example.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from ..types import ActionType
 from ._common import AdapterConfig, governed_callable
@@ -29,6 +29,7 @@ def governed_tool(
     tool_name: Optional[str] = None,
     action_type: Optional[ActionType] = None,
     fail_closed: bool = False,
+    action_types: Optional[Mapping[str, ActionType]] = None,
     workspace_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -44,6 +45,7 @@ def governed_tool(
         session_id=session_id,
         metadata=metadata,
         fail_closed=fail_closed,
+        action_types=action_types,
     )
 
     def decorator(func: Callable) -> Callable:

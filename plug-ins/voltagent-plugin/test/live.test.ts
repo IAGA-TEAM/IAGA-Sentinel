@@ -7,7 +7,7 @@ import { ToolDeniedError } from "@voltagent/core";
 import { createSentinelHooks } from "../dist/index.js";
 
 // Drives the plugin against a REAL open-mode sidecar:
-//   DATABASE_URL="sqlite:.live/live.db?mode=rwc" IAGA_SENTINEL_OPEN_MODE=true PORT=4010 iaga serve
+//   DATABASE_URL="sqlite:.live/live.db?mode=rwc" IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true PORT=4010 iaga serve
 // then: DATABASE_URL=... npm run test:live
 //
 // Uses the seeded demo agent `openclaw-builder-01` (framework openclaw,

@@ -34,6 +34,25 @@ impl SqliteStorage {
     }
 }
 
+/// The `created_at` an audit row should sort by, derived from the pipeline's
+/// own decision time.
+///
+/// `timestamp` is produced server-side (`execute_pipeline`'s `decision_ts`),
+/// never taken from the request, so it is safe as a sort key: a caller cannot
+/// reorder somebody else's audit trail by lying about the clock.
+///
+/// Falls back to now() if the string is not RFC3339. That is unreachable in the
+/// pipeline, but a fallback that silently produces an empty or malformed sort
+/// key would be worse than one that produces a slightly late-but-ordered one.
+pub(crate) fn audit_created_at(timestamp: &str) -> String {
+    const SQLITE_DATETIME: &str = "%Y-%m-%d %H:%M:%S%.6f";
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now())
+        .format(SQLITE_DATETIME)
+        .to_string()
+}
+
 // ── AuditStore ──
 
 #[async_trait]
@@ -75,9 +94,26 @@ impl AuditStore for SqliteStorage {
         let provider = event.usage.as_ref().map(|u| u.provider.clone());
         let model = event.usage.as_ref().map(|u| u.model.clone());
 
+        // The sort key of every audit read, supplied rather than defaulted.
+        //
+        // The column default is `datetime('now')` — WHOLE SECONDS — and this
+        // INSERT used to omit the column, so every row written inside one
+        // second tied and the `event_id DESC` tie-break (a UUID) became the
+        // real order: measured on five sequential live requests, the newest
+        // event came back fourth. Deriving it from the event's own decision
+        // time makes the read chronological, keeps it equal to the `timestamp`
+        // the API returns, and orders by when the action HAPPENED rather than
+        // when the write-behind task landed.
+        //
+        // Same `YYYY-MM-DD HH:MM:SS[.ffffff]` shape as the default, so it still
+        // compares lexicographically against rows already written at
+        // second precision (a bare second is a prefix of any fraction within
+        // it, and therefore sorts first — which is the correct answer).
+        let created_at = audit_created_at(&event.timestamp);
+
         sqlx::query(
-            "INSERT INTO audit_events (event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json, cost_usd, savings_usd, total_tokens, cache_hit, provider, model)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO audit_events (event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json, cost_usd, savings_usd, total_tokens, cache_hit, provider, model, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&event.event_id)
         .bind(&event.agent_id)
@@ -97,6 +133,7 @@ impl AuditStore for SqliteStorage {
         .bind(cache_hit)
         .bind(&provider)
         .bind(&model)
+        .bind(&created_at)
         .execute(&self.pool)
         .await?;
 
@@ -105,8 +142,16 @@ impl AuditStore for SqliteStorage {
 
     async fn list(&self, limit: u32) -> Result<Vec<StoredAuditEvent>, SentinelError> {
         let rows = sqlx::query_as::<_, AuditRow>(
-            "SELECT event_id, agent_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json
-             FROM audit_events ORDER BY created_at DESC LIMIT ?"
+            // `created_at` alone is not a total order. The INSERT now supplies
+            // it at microsecond precision (`audit_created_at`), so ties are
+            // rare rather than the normal state — but rows written before that
+            // change carry the whole-second column default, and nothing makes
+            // the value unique in either case. `event_id` is the PRIMARY KEY
+            // and breaks the tie, so the page boundary is stable instead of
+            // being whatever SQLite happened to return. Same fix the receipts
+            // store already applies to `last_ts`.
+            "SELECT event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json
+             FROM audit_events ORDER BY created_at DESC, event_id DESC LIMIT ?"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -125,19 +170,37 @@ impl AuditStore for SqliteStorage {
         let from = filter.from_date.clone().unwrap_or_default();
         let to = filter.to_date.clone().unwrap_or_default();
 
+        // `tenant_id` was destructured and then never used: four WHERE
+        // predicates where the Postgres twin has five. `tenant_id` is a
+        // documented query parameter of `exportAuditEvents`, so on SQLite — the
+        // DEFAULT backend — it was accepted and silently ignored, and the same
+        // request returned a different result set on the two backends. The
+        // column was also missing from the projection, so an exported row
+        // serialized `"tenantId": null` here and the real value on Postgres.
+        //
+        // NOT a confidentiality fix, and it should not be described as one:
+        // `/v1/audit/export` is `RequireAdmin`, `AuthContext` carries no tenant
+        // (auth/middleware.rs), and `GET /v1/audit` already returns every
+        // tenant unfiltered to the same caller. There is no tenant
+        // authorization boundary here to breach — this is a filter that did not
+        // filter, and a cross-backend divergence.
+        let tenant = filter.tenant_id.clone().unwrap_or_default();
+
         let rows = sqlx::query_as::<_, AuditRow>(
-            "SELECT event_id, agent_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json
+            "SELECT event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json
              FROM audit_events
              WHERE (? = '' OR agent_id = ?)
                AND (? = '' OR decision = ?)
                AND (? = '' OR timestamp >= ?)
                AND (? = '' OR timestamp <= ?)
-             ORDER BY created_at DESC LIMIT ?"
+               AND (? = '' OR tenant_id = ?)
+             ORDER BY created_at DESC, event_id DESC LIMIT ?"
         )
         .bind(&agent).bind(&agent)
         .bind(&decision).bind(&decision)
         .bind(&from).bind(&from)
         .bind(&to).bind(&to)
+        .bind(&tenant).bind(&tenant)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -158,7 +221,7 @@ impl AuditStore for SqliteStorage {
                 .await?;
 
         let decision_rows = sqlx::query(
-            "SELECT decision, COUNT(*) as cnt FROM audit_events GROUP BY decision ORDER BY cnt DESC",
+            "SELECT decision, COUNT(*) as cnt FROM audit_events GROUP BY decision ORDER BY cnt DESC, decision ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -171,7 +234,11 @@ impl AuditStore for SqliteStorage {
         }
 
         let agent_rows = sqlx::query(
-            "SELECT agent_id, COUNT(*) as cnt FROM audit_events GROUP BY agent_id ORDER BY cnt DESC LIMIT 10",
+            // `cnt DESC` alone is not a total order: agents tied on count are
+            // returned in whatever order the plan produced, so which of them
+            // survives `LIMIT 10` is arbitrary and can differ between two calls
+            // and between the two backends. `agent_id` breaks the tie.
+            "SELECT agent_id, COUNT(*) as cnt FROM audit_events GROUP BY agent_id ORDER BY cnt DESC, agent_id ASC LIMIT 10",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -186,7 +253,7 @@ impl AuditStore for SqliteStorage {
             .collect();
 
         let tool_rows = sqlx::query(
-            "SELECT tool_name, COUNT(*) as cnt FROM audit_events GROUP BY tool_name ORDER BY cnt DESC LIMIT 10",
+            "SELECT tool_name, COUNT(*) as cnt FROM audit_events GROUP BY tool_name ORDER BY cnt DESC, tool_name ASC LIMIT 10",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -227,7 +294,7 @@ impl AuditStore for SqliteStorage {
              FROM audit_events
              WHERE ? = '' OR agent_id = ?
              GROUP BY agent_id
-             ORDER BY total DESC",
+             ORDER BY total DESC, agent_id ASC",
         )
         .bind(agent_filter)
         .bind(agent_filter)
@@ -361,8 +428,14 @@ impl AuditStore for SqliteStorage {
         let from = from.unwrap_or("");
         let to = to.unwrap_or("");
         // `fmt` is from a fixed allow-list, never user input.
+        // The day bucket renders a full timestamp so the label matches the
+        // Postgres twin, which always emits YYYY-MM-DDTHH:MM:SSZ via
+        // `to_char(date_trunc(...))`. They agreed on `hour` and disagreed on
+        // `day` for the same data, and the handler passes the string straight
+        // through. Grouping and ORDER BY are unaffected: the suffix is constant
+        // within a day.
         let fmt = if bucket == "day" {
-            "%Y-%m-%d"
+            "%Y-%m-%dT00:00:00Z"
         } else {
             "%Y-%m-%dT%H:00:00Z"
         };
@@ -421,7 +494,7 @@ impl SqliteStorage {
              FROM audit_events
              WHERE usage_json IS NOT NULL
                AND (? = '' OR timestamp >= ?) AND (? = '' OR timestamp <= ?)
-             GROUP BY {col} ORDER BY net DESC LIMIT ?",
+             GROUP BY {col} ORDER BY net DESC, k ASC LIMIT ?",
             col = column
         );
         let rows = sqlx::query(&sql)
@@ -574,7 +647,7 @@ impl ReviewStore for SqliteStorage {
     async fn list(&self) -> Result<Vec<ReviewRequest>, SentinelError> {
         let rows = sqlx::query_as::<_, ReviewRow>(
             "SELECT id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons, created_at, updated_at
-             FROM review_requests ORDER BY created_at ASC"
+             FROM review_requests ORDER BY created_at ASC, id ASC"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1011,7 +1084,8 @@ impl ApiKeyStore for SqliteStorage {
 
     async fn list_keys(&self) -> Result<Vec<ApiKeyRecord>, SentinelError> {
         let rows = sqlx::query_as::<_, ApiKeyRow>(
-            "SELECT id, label, created_at, scope FROM api_keys ORDER BY created_at DESC",
+            // `created_at` is a whole-second default here too; `id` is the PK.
+            "SELECT id, label, created_at, scope FROM api_keys ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1140,7 +1214,7 @@ impl TenantStore for SqliteStorage {
     async fn list_tenants(&self) -> Result<Vec<Tenant>, SentinelError> {
         use sqlx::Row;
         let rows = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata, created_at FROM tenants ORDER BY created_at",
+            "SELECT tenant_id, name, enabled, metadata, created_at FROM tenants ORDER BY created_at, tenant_id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1252,7 +1326,7 @@ impl NhiStore for SqliteStorage {
 
         let rows = sqlx::query(
             "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities, created_at
-             FROM nhi_identities ORDER BY created_at"
+             FROM nhi_identities ORDER BY created_at, agent_id"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1695,5 +1769,36 @@ impl RateLimitStore for SqliteStorage {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod audit_created_at_tests {
+    use super::audit_created_at;
+
+    /// The shape has to match the column default it replaces, or old and new
+    /// rows stop comparing correctly in the same `ORDER BY`.
+    #[test]
+    fn keeps_the_sqlite_datetime_shape_and_sorts_against_whole_seconds() {
+        let got = audit_created_at("2026-08-09T12:00:00.300000Z");
+        assert_eq!(got, "2026-08-09 12:00:00.300000");
+
+        // A row written by an older build, at whole-second precision.
+        let legacy = "2026-08-09 12:00:00".to_string();
+        assert!(
+            legacy < got,
+            "a bare second must sort before any fraction within it"
+        );
+        assert!(audit_created_at("2026-08-09T11:59:59.999999Z") < legacy);
+    }
+
+    /// Offsets are normalised, so two rows written from differently-configured
+    /// processes still order against each other.
+    #[test]
+    fn normalises_to_utc() {
+        assert_eq!(
+            audit_created_at("2026-08-09T14:00:00.500000+02:00"),
+            audit_created_at("2026-08-09T12:00:00.500000Z")
+        );
     }
 }

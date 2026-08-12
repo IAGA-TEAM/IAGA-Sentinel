@@ -113,19 +113,33 @@ pub fn score_tool_risk_with_thresholds(
 
     pattern_score = pattern_score.min(100);
 
-    // ── Composite score from all 8 layers ──
-    // Each layer contributes proportionally to its detection confidence.
-    // We take the MAX of each signal group to avoid double-counting,
-    // then compute a weighted composite.
+    // ── Composite score from the SCORING layers ──
+    // Each contributes proportionally to its detection confidence; we take the
+    // MAX within a signal group to avoid double-counting, then weight.
+    //
+    // NOT "all 8 layers", despite the eight-layer framing elsewhere:
+    //   - Sandbox has NO term here. It is advisory containment; nothing it does
+    //     enters this score (see `sandboxResult` in `layer_roles`).
+    //   - `behavioral` appears only as `policy.max(behavioral)`, and its risk
+    //     contribution is pinned to 0 upstream (DET-BEHAVIORAL-2 in
+    //     execute_pipeline), so the max is always `policy`. The term is kept for
+    //     the day that pin is lifted, not because it currently adds anything.
+    // The weights below sum to 1.10, NOT 1.0, so `.min(100)` below is a real
+    // clamp rather than a defensive no-op: a request saturating every slot
+    // reaches 110 before it is capped. (Leaving the pattern slot at zero, as
+    // `tests/tool_risk_arithmetic.rs` does, gives the 0.95 that test asserts.)
     //
     // Weight allocation:
     //   - Pattern matching (local):  15% , fast regex-based detection
     //   - Adaptive ensemble:         20% , 5-signal ML-style scoring
     //   - Firewall:                  20% , injection-specific detection
-    //   - Policy + behavioral:       15% , authorization & baseline
+    //   - Policy (behavioral inert): 15% , authorization & baseline
     //   - Taint + threat intel:      15% , data flow & IOC matching
     //   - Secrets:                   10% , vault policy enforcement
-    //   - Session graph:              5% , stateful anomaly
+    //   - Session graph:              5% , `layers.session_graph`, which
+    //                                     `execute_pipeline` sets to the SIGNED
+    //                                     `anomaly_score`. The separate
+    //                                     `advisoryScore` is not weighted here.
     //   - WASM plugins:              10% , custom detectors/community extensions
 
     let composite = (pattern_score as f64 * 0.15)

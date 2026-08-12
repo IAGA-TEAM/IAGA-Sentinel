@@ -15,13 +15,14 @@ Dependency-light: the handler does not import llama_index; it reads the real
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/llamaindex/llamaindex.policy.yaml
+./target/release/iaga import plug-ins/llamaindex-adapter/llamaindex.policy.yaml
 ```
 
 The tool's `metadata.name` must be an approved tool name (the example uses
@@ -31,7 +32,7 @@ The tool's `metadata.name` must be an approved tool name (the example uses
 
 ```bash
 pip install llama-index-core iaga-sentinel
-python examples/integrations/llamaindex/python_example.py
+python plug-ins/llamaindex-adapter/python_example.py
 ```
 
 ```python

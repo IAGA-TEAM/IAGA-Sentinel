@@ -24,16 +24,26 @@ Two kinds live here:
 
 ### 1. Run the Sentinel sidecar
 
-Pull the pinned image and run it in open mode (no auth — for local dev/demos):
+Build the image from the repo root and run it in open mode (no auth — for local dev/demos).
+There is no published image to pull yet; see the note in the root `README.md`.
 
 ```bash
-docker pull ghcr.io/iaga-team/iaga-sentinel:v2.0.1
-docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
-  ghcr.io/iaga-team/iaga-sentinel:v2.0.1 serve --seed-demo
+docker build -t iaga-sentinel:local .        # from the repo root
+docker run -p 127.0.0.1:4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
+  iaga-sentinel:local serve --seed-demo
+# Open mode makes every unauthenticated caller an implicit ADMIN while no API key exists, so
+# publish on loopback only — otherwise /v1/audit, the signed decision log, is readable by the
+# whole LAN. Pin the publish, not IAGA_SENTINEL_HOST: binding the container to its own loopback
+# would make the published port unreachable.
 ```
 
-The REST API and operator dashboard are now at <http://localhost:4010/>. (In
-production, drop open mode and pass an API key via `IAGA_SENTINEL_API_KEY`.)
+The REST API and operator dashboard are now at <http://localhost:4010/>.
+
+In production, drop open mode and require a key. The two sides use different
+names on purpose: **server-side** you mint one with `iaga gen-key`, or register
+an operator-supplied one at startup via `IAGA_SENTINEL_BOOTSTRAP_API_KEY`;
+**client-side** the plug-ins read `IAGA_SENTINEL_API_KEY` and send it as the
+bearer token. `IAGA_SENTINEL_API_KEY` is not read by the server at all.
 
 ### 2. Pick your integration
 
@@ -87,7 +97,11 @@ iaga-verify chain.json                               # -> CHAIN OK
 
 Everything here is **cooperative agent-loop tier**, not kernel enforcement:
 
-- **Fail-closed by default** — when the sidecar is unreachable, the gate denies.
+- **Fail-closed by default — in the released plugins only.** `voltagent-plugin`
+  (`failClosed: true`) and `letta-plugin` (`fail_closed: bool = True`) deny when
+  the sidecar is unreachable. The copy-paste `*-adapter/` snippets are
+  **fail-open** by default: pass `fail_closed=True` / `failClosed: true`
+  yourself, or an outage silently ungoverns every call.
 - **Bypassable** — if the host strips the integration (or calls the tool outside
   the framework), nothing stops execution. The block is cooperative.
 - Every OSS receipt carries **`isAuthoritative: false`** — the community build

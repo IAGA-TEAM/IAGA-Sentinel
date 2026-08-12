@@ -1,13 +1,23 @@
 openapi: 3.1.0
 info:
   title: IAGA Sentinel API
-  version: 2.0.1
+  version: 2.0.2
   description: >
     IAGA Sentinel is the EU AI Act conformity evidence layer for AI agents.
     It intercepts tool calls, evaluates risk against typed policies, and
     produces Ed25519-signed, replay-verifiable receipts across an 8-layer
-    governance pipeline (two of them advisory), structured to support AI Act
-    Article 12 record-keeping and to help produce Annex IV technical documentation.
+    governance pipeline, structured to support AI Act Article 12 record-keeping
+    and to help produce Annex IV technical documentation.
+
+
+    Not every layer can decide. Each layer block in an inspect response carries
+    a role in `layerRoles`: `veto` (can force a decision), `scoring`
+    (contributes to the composite), or `advisory` (reported, never decisive).
+    The sandbox result, the behavioural fingerprint and the session graph's
+    `advisoryScore` are advisory by construction — counting them as defences
+    overstates coverage. Note the session graph's signed `anomalyScore` is a
+    different field and is NOT advisory: it is a term in the composite and
+    escalates to review on its own at 50.
 
 
     Since 1.5.2 API keys carry a scope: `admin` (default — full access,
@@ -382,6 +392,8 @@ paths:
                 $ref: "#/components/schemas/AgentProfile"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -426,6 +438,8 @@ paths:
                 $ref: "#/components/schemas/AgentProfile"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
     delete:
@@ -439,6 +453,8 @@ paths:
           description: Profile deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -481,6 +497,8 @@ paths:
                 $ref: "#/components/schemas/WorkspacePolicy"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -525,6 +543,8 @@ paths:
                 $ref: "#/components/schemas/WorkspacePolicy"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
     delete:
@@ -538,6 +558,8 @@ paths:
           description: Workspace deleted
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -587,6 +609,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -898,6 +922,8 @@ paths:
                 $ref: "#/components/schemas/NhiIdentity"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/nhi/attest:
     post:
@@ -1102,6 +1128,8 @@ paths:
                 $ref: "#/components/schemas/SandboxEntry"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1121,6 +1149,8 @@ paths:
                 $ref: "#/components/schemas/SandboxEntry"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1853,6 +1883,55 @@ components:
             $ref: "#/components/schemas/ErrorResponse"
 
   schemas:
+    # ── Taint correlation scope ──
+    TaintCorrelationScope:
+      type: object
+      description: >-
+        What the multi-step correlation behind this verdict was actually keyed
+        on. Present on every response that ran the taint layer.
+
+
+        This block is a stated LIMITATION, not a feature. `sessionId` is chosen
+        by the caller, so an agent that rotates it between reading a credential
+        and sending it out produces two uncorrelated verdicts, and nothing else
+        in the response says so. A reader who is told the basis can judge what
+        the verdict does not cover.
+
+
+        Set `IAGA_SENTINEL_TAINT_AGENT_WINDOW_SECS` to also correlate across one
+        agent's sessions within a window. `agentId` is client-declared too, so
+        that raises the bar from rotating one field to rotating two rather than
+        closing the gap; binding `sessionId` to an NHI identity is the fix that
+        would, and it does not exist yet. Only the `secret` label crosses a
+        session boundary, and only into a request carrying a body — folding in
+        every label blocked ordinary read-then-fetch work in measurement.
+
+
+        The aggregation store is in-memory and per-process: it does not survive
+        a restart and does not span replicas.
+      required: [basis, sessionIdSource, aggregatedByAgent, caveat]
+      properties:
+        basis:
+          type: string
+          enum: ["session", "session+agent"]
+          example: "session"
+        sessionIdSource:
+          type: string
+          description: >-
+            Whether the session key came from the caller or was defaulted to
+            `agentId` because no `metadata.sessionId` was supplied.
+          example: "client-declared metadata.sessionId"
+        aggregatedByAgent:
+          type: boolean
+          example: false
+        agentWindowSecs:
+          type: integer
+          description: Present only when aggregation is enabled.
+          example: 900
+        caveat:
+          type: string
+          description: Plain-language statement of what this verdict does not cover.
+
     # ── Error ──
     ErrorResponse:
       type: object
@@ -2165,19 +2244,67 @@ components:
           type: string
           format: uuid
         sessionGraph:
-          description: L1 session graph data
+          description: >-
+            L1 session graph data. VETO — its attack signatures can force a
+            verdict on their own. Its `advisoryScore` cannot.
         taintAnalysis:
-          description: L2 taint tracking data
+          description: >-
+            L2 taint tracking data. VETO. Carries `correlationScope`, which
+            states what the multi-step correlation was keyed on: by default the
+            client-declared `metadata.sessionId`, so a caller that rotates that
+            id between steps is NOT correlated across them. Read it before
+            treating a single `allow` as evidence about a chain.
+          type: object
+          properties:
+            correlationScope:
+              $ref: "#/components/schemas/TaintCorrelationScope"
         adaptiveRisk:
-          description: L4 adaptive risk scoring data
+          description: >-
+            L4 adaptive risk scoring data. SCORING — contributes to the
+            composite and can escalate to review. It has no score-driven block
+            arm: at its default weights the signed ceiling of its four signals is
+            below the block threshold, so `decision: "block"` here comes only
+            from the categorical exfiltration override. Admin feedback
+            (POST /v1/risk/feedback) re-normalises those weights and can lift the
+            ceiling, but still cannot block, because the decision carries no score
+            arm to reach. Its `advisory` array is excluded from the signed score
+            entirely.
         sandboxResult:
-          description: L5 sandbox execution result
+          description: >-
+            L5 sandbox execution result. ADVISORY — the composite risk formula
+            has no sandbox term, so nothing here moves a verdict. It is
+            containment and reporting.
         injectionFirewall:
-          description: L7 injection firewall analysis
+          description: L7 injection firewall analysis. VETO.
         policyVerification:
-          description: L6 formal policy verification result
+          description: >
+            L6 formal policy verification result. ADVISORY - it lints the
+            WORKSPACE POLICY, not the request. `execute_pipeline` computes it,
+            serializes it and never reads it back, so no issue it reports - at
+            any severity - changes a verdict. `policyFindings` is the arm that
+            judges the request and vetoes.
         telemetrySpan:
-          description: L8 telemetry span reference
+          description: L8 telemetry span reference. ADVISORY.
+        behavioralFingerprint:
+          description: >-
+            ADVISORY — risk contribution pinned to 0 (DET-BEHAVIORAL-2), because
+            it derives from process-global mutable state a receipt cannot
+            reproduce. Reported, never decisive.
+        advisory:
+          description: >-
+            ADVISORY — signals excluded from the signed verdict by construction
+            (D1), so the receipt stays reproducible from its recorded inputs.
+            Absent when nothing fired.
+        layerRoles:
+          description: >-
+            Machine-readable role for each layer block above: `veto` (can force
+            a decision), `scoring` (contributes a term to the composite), or
+            `advisory` (reported, never decisive). Published because a response
+            listing ten layer blocks otherwise reads as ten defences, and four
+            of them cannot move a verdict by construction: `sandboxResult`,
+            `behavioralFingerprint`, `telemetrySpan` and `policyVerification`.
+            Note `sessionGraph.advisoryScore` is a sub-field, not one of the
+            ten.
 
     # ── Reviews ──
     ReviewRequest:
@@ -2260,6 +2387,30 @@ components:
         requiresHumanReview:
           type: boolean
           default: false
+        destinationFields:
+          type: array
+          default: []
+          items:
+            type: string
+          description: >-
+            Payload keys carrying this tool's egress destination, in priority
+            order. Declaring them makes the workspace domain allowlist
+            fail-closed FOR THIS TOOL: a payload exposing none of these keys is
+            blocked rather than silently skipping the domain check.
+
+
+            Leave empty for a tool whose destination is not caller-controlled —
+            an LLM SDK call such as `openai.chat.completions.create` is an
+            `http` action whose destination lives in the SDK, and declaring
+            fields for it would block every call. That is per-tool information,
+            which is why this lives here and not on the action type.
+
+
+            Undeclared tools keep the legacy fixed probe
+            (`destination`/`url`/`endpoint`/`href`), which skips the allowlist
+            when it finds nothing. An `http` action that reaches that fallback
+            and still shows an unallowlisted host in some other key is escalated
+            to review, never blocked.
 
     WorkspacePolicy:
       type: object

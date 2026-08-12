@@ -128,24 +128,13 @@ proptest! {
         }
     }
 
-    /// classify_sink must not panic on arbitrary inputs.
-    #[test]
-    fn taint_classify_sink_no_panic(
-        action in "\\PC{0,100}",
-        tool in "\\PC{0,100}",
-    ) {
-        let _ = taint_tracker::classify_sink(&action, &tool);
-    }
-
-    /// classify_source must not panic on arbitrary inputs.
-    #[test]
-    fn taint_classify_source_no_panic(
-        action in "\\PC{0,100}",
-        tool in "\\PC{0,100}",
-        payload in "\\PC{0,500}",
-    ) {
-        let _ = taint_tracker::classify_source(&action, &tool, &payload);
-    }
+    // ponytail: `taint_classify_sink_no_panic` and
+    // `taint_classify_source_no_panic` used to sit here. Both are strictly
+    // subsumed by `taint_analyze_no_panic` below: `analyze_taint` calls
+    // `classify_source` and `classify_sink` unconditionally, with the
+    // arguments passed straight through, and drives them over the SAME
+    // generators. At 500 cases each that was 1,000 generated inputs reaching
+    // no code the surviving property does not already reach.
 
     /// analyze_taint must not panic on arbitrary inputs.
     #[test]
@@ -246,11 +235,22 @@ proptest! {
         };
         let result = adaptive_scorer::calculate_adaptive_risk(&input, chrono::Utc::now());
 
-        // Without exfiltration, decision must follow score thresholds
-        if result.total_score >= 70 {
-            prop_assert_eq!(result.decision, "block",
-                "score={} should be block", result.total_score);
-        } else if result.total_score >= 35 {
+        // Without exfiltration, decision must follow the score thresholds — and
+        // "block" is not among them: this layer has no score-driven block arm,
+        // so the only categorical route to a block is the exfiltration override,
+        // which these generators never set.
+        //
+        // Reference the constant rather than restating it: this used to say
+        // `>= 70` and silently became a SECOND, wrong source of truth when the
+        // layer got its own threshold. It kept passing only because
+        // `taint_result: None` pins `context_risk` to 0, which caps the
+        // reachable score at 41.5 under these generators — so the band that
+        // actually changed was never generated here. Widening the generators to
+        // supply a taint result is what would make this property meaningful.
+        prop_assert_ne!(result.decision.as_str(), "block",
+            "score={} produced a block with no exfiltration flag; the \
+             score-driven block arm was removed", result.total_score);
+        if result.total_score >= adaptive_scorer::ADAPTIVE_THRESHOLD_REVIEW {
             prop_assert_eq!(result.decision, "human_review",
                 "score={} should be human_review", result.total_score);
         } else {

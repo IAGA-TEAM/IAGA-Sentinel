@@ -72,6 +72,24 @@ export interface GovernanceResult {
   auditEvent?: JsonObject;
   profile?: JsonObject;
   workspacePolicy?: JsonObject;
+  /**
+   * The role each layer plays in a verdict: `veto` (can decide on its own),
+   * `scoring` (contributes to the composite), or `advisory` (reported, never
+   * decisive). Present so a consumer is not left to infer that four of the ten
+   * layer blocks — `sandboxResult`, the behavioural fingerprint,
+   * `telemetrySpan` and `policyVerification` — cannot move a decision, and
+   * neither can the session graph's `advisoryScore` sub-field; counting them as
+   * active defences overstates coverage.
+   * Note the session graph's signed `anomalyScore` is a different field and IS
+   * decisive: it is a term in the composite and escalates to review on its own
+   * at 50. Absent against an older server that does not send it.
+   */
+  layerRoles?: Record<string, LayerRole>;
+}
+
+export interface LayerRole {
+  role: "veto" | "scoring" | "advisory";
+  note?: string;
 }
 
 export interface AuditEvent {

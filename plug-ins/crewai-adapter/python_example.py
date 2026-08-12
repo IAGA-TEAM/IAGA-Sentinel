@@ -1,7 +1,7 @@
 """Govern a CrewAI agent's tools with IAGA Sentinel.
 
     pip install crewai iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then run your crew.
 
 CrewAI's native `guardrail=` validates tool *output* (post-execution). To block a

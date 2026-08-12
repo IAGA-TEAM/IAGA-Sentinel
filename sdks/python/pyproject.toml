@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "iaga-sentinel"
-version = "2.0.1"
+version = "2.0.2"
 description = "IAGA Sentinel Python SDK: signed, replay-verifiable audit evidence for AI agent actions"
 readme = "README.md"
 license = "BUSL-1.1"

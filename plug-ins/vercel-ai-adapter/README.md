@@ -11,13 +11,14 @@ Govern Vercel AI SDK generations. `sentinelMiddleware` wraps the model so each
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/vercel-ai/vercel-ai.policy.yaml
+./target/release/iaga import plug-ins/vercel-ai-adapter/vercel-ai.policy.yaml
 ```
 
 ## 3. Run
@@ -25,7 +26,7 @@ IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```bash
 npm i ai @ai-sdk/openai @iaga-sentinel/sdk
 # Set OPENAI_API_KEY in your shell, then:
-npx tsx examples/integrations/vercel-ai/ts_example.ts
+npx tsx plug-ins/vercel-ai-adapter/ts_example.ts
 ```
 
 ```ts

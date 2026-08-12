@@ -15,20 +15,21 @@ each call is inspected through `POST /v1/inspect` first.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/autogen/autogen.policy.yaml
+./target/release/iaga import plug-ins/autogen-adapter/autogen.policy.yaml
 ```
 
 ## 3. Run
 
 ```bash
 pip install ag2 iaga-sentinel   # or autogen-agentchat
-python examples/integrations/autogen/python_example.py
+python plug-ins/autogen-adapter/python_example.py
 ```
 
 ```python

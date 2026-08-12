@@ -1,5 +1,5 @@
 # Registers the "openai-demo" agent.
-#   iaga import examples/integrations/openai/openai.policy.yaml
+#   iaga import plug-ins/openai-adapter/openai.policy.yaml
 profiles:
   - agentId: openai-demo
     workspaceId: ws-openai

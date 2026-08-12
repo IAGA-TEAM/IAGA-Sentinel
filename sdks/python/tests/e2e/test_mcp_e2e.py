@@ -2,7 +2,12 @@
 
 Verifies (1) the wrapper preserves the signature so FastMCP can still build the
 tool inputSchema when stacked under @server.tool(), and (2) allow/block
-enforcement. Auto-skips when the `mcp` package is absent.
+enforcement. Auto-skips when FastMCP is absent.
+
+Guard the module this file actually imports, not just `mcp`: `mcp` 2.0.0 ships
+without `mcp.server.fastmcp`, so an `importorskip("mcp")` guard passes there and
+the import below raises during collection — which aborts the whole SDK suite
+instead of skipping this one module.
 """
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ import asyncio
 
 import pytest
 
-pytest.importorskip("mcp")
+pytest.importorskip("mcp.server.fastmcp")
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 

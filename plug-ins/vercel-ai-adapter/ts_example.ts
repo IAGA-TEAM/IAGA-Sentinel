@@ -2,10 +2,10 @@
  * Govern Vercel AI SDK generations with IAGA Sentinel.
  *
  *   npm i ai @ai-sdk/openai @iaga-sentinel/sdk
- *   IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+ *   IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
  *   # register the agent (see README.md), then run with tsx:
  *   # set OPENAI_API_KEY in your shell, then:
- *   npx tsx examples/integrations/vercel-ai/ts_example.ts
+ *   npx tsx plug-ins/vercel-ai-adapter/ts_example.ts
  *
  * sentinelMiddleware wraps the model so each generate/stream is inspected through
  * IAGA first. allow -> generates; block/review -> SentinelBlockedError /

@@ -4,9 +4,9 @@ The `@governed` decorator is the baseline every other adapter mirrors: it
 inspects each call through `POST /v1/inspect` before the function body runs.
 
     pip install iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then:
-    python examples/integrations/custom/python_example.py
+    python plug-ins/custom-adapter/python_example.py
 
 allow -> runs; block/review -> PermissionError (or your on_block/on_review).
 """

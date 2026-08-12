@@ -1,5 +1,5 @@
 # Registers the "langchain-demo" agent used by python_example.py.
-#   iaga import examples/integrations/langchain/langchain.policy.yaml
+#   iaga import plug-ins/langchain-adapter/langchain.policy.yaml
 # Decisions default to allow (every call still produces a receipt); the injection
 # firewall hard-blocks dangerous payloads (curl | sh) regardless.
 profiles:

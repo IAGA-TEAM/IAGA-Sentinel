@@ -21,7 +21,7 @@ See plug-ins/mcp-adapter/ for a runnable example.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from ..types import ActionType
 from ._common import AdapterConfig, governed_callable
@@ -36,6 +36,7 @@ def govern_tool(
     framework: str = "model-context-tool",
     action_type: Optional[ActionType] = None,
     fail_closed: bool = False,
+    action_types: Optional[Mapping[str, ActionType]] = None,
     workspace_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -51,6 +52,7 @@ def govern_tool(
         session_id=session_id,
         metadata=metadata,
         fail_closed=fail_closed,
+        action_types=action_types,
     )
 
     def decorator(handler: Callable) -> Callable:

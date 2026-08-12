@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ..types import ActionType
-from ._common import AdapterConfig, build_request, inspect_async, inspect_sync
+from ._common import (
+    AdapterConfig,
+    build_request,
+    inspect_async,
+    inspect_sync,
+    resolve_action_type,
+)
 
 
 class AutoGenSentinelHook:
@@ -26,6 +32,7 @@ class AutoGenSentinelHook:
         session_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         fail_closed: bool = False,
+        action_types: Optional[Mapping[str, ActionType]] = None,
     ):
         self._config = AdapterConfig(
             agent_id=agent_id,
@@ -37,20 +44,24 @@ class AutoGenSentinelHook:
             session_id=session_id,
             metadata=metadata,
             fail_closed=fail_closed,
+            action_types=action_types,
         )
 
     def pre_tool_call(
         self,
         tool_name: str,
         payload: dict[str, Any],
-        action_type: ActionType = ActionType.CUSTOM,
+        action_type: Optional[ActionType] = None,
     ) -> None:
         inspect_sync(
             self._config,
             build_request(
                 self._config,
                 tool_name=tool_name,
-                action_type=action_type,
+                action_type=action_type
+                or resolve_action_type(
+                    self._config, tool_name, default=ActionType.CUSTOM
+                ),
                 payload=payload,
             ),
         )
@@ -59,14 +70,17 @@ class AutoGenSentinelHook:
         self,
         tool_name: str,
         payload: dict[str, Any],
-        action_type: ActionType = ActionType.CUSTOM,
+        action_type: Optional[ActionType] = None,
     ) -> None:
         await inspect_async(
             self._config,
             build_request(
                 self._config,
                 tool_name=tool_name,
-                action_type=action_type,
+                action_type=action_type
+                or resolve_action_type(
+                    self._config, tool_name, default=ActionType.CUSTOM
+                ),
                 payload=payload,
             ),
         )

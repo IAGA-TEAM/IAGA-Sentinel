@@ -1,5 +1,5 @@
 # Registers the "ms-agent-demo" agent.
-#   iaga import examples/integrations/microsoft-agent-framework/microsoft-agent-framework.policy.yaml
+#   iaga import plug-ins/microsoft-agent-framework-adapter/microsoft-agent-framework.policy.yaml
 profiles:
   - agentId: ms-agent-demo
     workspaceId: ws-ms-agent

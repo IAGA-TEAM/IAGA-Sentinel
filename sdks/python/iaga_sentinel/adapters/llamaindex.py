@@ -10,9 +10,10 @@ See plug-ins/llamaindex-adapter/ for a runnable example.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
-from ._common import AdapterConfig, build_request, infer_action_type, inspect_sync
+from ..types import ActionType
+from ._common import AdapterConfig, build_request, inspect_sync, resolve_action_type
 
 
 def _is_function_call(event_type: Any) -> bool:
@@ -56,6 +57,7 @@ class IagaCallbackHandler:
         session_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         fail_closed: bool = False,
+        action_types: Optional[Mapping[str, ActionType]] = None,
     ):
         # LlamaIndex passes these to BaseCallbackHandler.__init__; accept and ignore.
         self.event_starts_to_ignore: tuple = ()
@@ -70,6 +72,7 @@ class IagaCallbackHandler:
             session_id=session_id,
             metadata=metadata,
             fail_closed=fail_closed,
+            action_types=action_types,
         )
 
     def on_event_start(
@@ -87,7 +90,7 @@ class IagaCallbackHandler:
                 build_request(
                     self._config,
                     tool_name=tool_name,
-                    action_type=infer_action_type(tool_name),
+                    action_type=resolve_action_type(self._config, tool_name),
                     payload=args,
                 ),
             )

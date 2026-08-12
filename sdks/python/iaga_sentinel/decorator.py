@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import inspect
 from typing import Any, Callable, Optional
 
 import httpx
 
+from ._payload import named_payload
 from .client import SentinelClient, AsyncSentinelClient
 from .types import (
     ActionDetail,
@@ -147,27 +147,34 @@ def governed(
 
 
 def _build_payload(args: tuple, kwargs: dict, func: Callable) -> dict[str, Any]:
-    """Build payload dict from function arguments."""
-    sig = inspect.signature(func)
-    params = list(sig.parameters.keys())
-    payload: dict[str, Any] = {}
+    """Build payload dict from function arguments.
 
-    for i, arg in enumerate(args):
-        if i < len(params):
-            payload[params[i]] = _safe_serialize(arg)
+    Delegates to :func:`named_payload` so ``@governed`` and ``governed_callable``
+    build the SAME payload. Two divergences used to sit here, and both reached
+    the signed receipt:
 
-    for k, v in kwargs.items():
-        payload[k] = _safe_serialize(v)
+    * No ``exclude`` set. ``@governed`` on a bound method serialised ``self``
+      through the ``str(val)`` fallback into ``action.payload``, which is hashed
+      into the receipt - so an instance repr, potentially carrying a credential
+      held on the object, was signed. ``named_payload`` has always excluded
+      ``self``/``ctx``/``context``.
+    * Positional arguments past ``len(params)`` were DROPPED, so a ``*args`` call
+      under-reported what it did. ``named_payload`` names them ``arg{i}``.
 
-    return payload
+    Not delegated wholesale to ``governed_callable``: ``ensure_allowed`` raises
+    inside ``inspect_sync``/``inspect_async`` before ``call()`` runs, so the
+    ``on_block``/``on_review`` callbacks could no longer receive the
+    ``GovernanceResult``.
 
+    .. warning::
 
-def _safe_serialize(val: Any) -> Any:
-    """Convert value to JSON-safe representation."""
-    if isinstance(val, (str, int, float, bool, type(None))):
-        return val
-    if isinstance(val, (list, tuple)):
-        return [_safe_serialize(v) for v in val]
-    if isinstance(val, dict):
-        return {str(k): _safe_serialize(v) for k, v in val.items()}
-    return str(val)
+       ``named_payload``'s default ``exclude`` is ``("self", "ctx", "context")``,
+       so this change ALSO stops sending arguments named ``ctx``/``context``.
+       That is a deliberate but real reduction in detection surface: a plain
+       ``def run_query(sql, context)`` used to put ``context`` in front of the
+       static-risk pattern scan, the taint tracker and the receipt input hash,
+       and no longer does. ``self`` is the one that had to go — it is an
+       instance repr nobody chose to send. If a caller needs ``context``
+       governed, pass it under a different parameter name.
+    """
+    return named_payload(func, args, kwargs)

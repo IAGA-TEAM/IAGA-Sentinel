@@ -1,7 +1,7 @@
 """Govern an AutoGen / AG2 agent's tools with IAGA Sentinel.
 
     pip install autogen-agentchat iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then run your agent.
 
 AutoGen's hooks operate on messages, not tool execution, so to gate a tool

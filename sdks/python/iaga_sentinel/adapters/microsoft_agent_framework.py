@@ -14,9 +14,10 @@ See plug-ins/microsoft-agent-framework-adapter/ for a runnable example.
 """
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
-from ._common import AdapterConfig, build_request, infer_action_type, inspect_async
+from ..types import ActionType
+from ._common import AdapterConfig, build_request, inspect_async, resolve_action_type
 
 
 def _function_name(context: Any) -> str:
@@ -44,6 +45,7 @@ def sentinel_middleware(
     api_key: Optional[str] = None,
     framework: str = "microsoft-agent-framework",
     fail_closed: bool = False,
+    action_types: Optional[Mapping[str, ActionType]] = None,
     workspace_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -59,6 +61,7 @@ def sentinel_middleware(
         session_id=session_id,
         metadata=metadata,
         fail_closed=fail_closed,
+        action_types=action_types,
     )
 
     async def middleware(
@@ -73,7 +76,7 @@ def sentinel_middleware(
             build_request(
                 config,
                 tool_name=tool_name,
-                action_type=infer_action_type(tool_name),
+                action_type=resolve_action_type(config, tool_name),
                 payload=_arguments(context),
             ),
         )

@@ -162,3 +162,78 @@ fn unexpected_extra_argument_exits_two() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected argument"));
 }
+
+// ── --expect-count: the offline defence against tail truncation ──
+//
+// "CHAIN OK" proves the chain is a valid PREFIX. Drop the trailing receipts and
+// what remains is a shorter valid chain that still exits 0 — a reader notices
+// only from the printed count. `--expect-count` turns an external record of the
+// true length into an exit code, without touching the frozen receipt bytes.
+
+#[test]
+fn expect_count_matching_the_chain_still_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let signer = ReceiptSigner::generate();
+    let path = write_export(&dir, &signer, build_chain(&signer, 5));
+
+    let out = Command::new(BIN)
+        .args([&path, "--expect-count", "5"])
+        .output()
+        .expect("run bin");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("CHAIN OK"));
+}
+
+#[test]
+fn a_tail_truncated_chain_fails_against_the_expected_count() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let signer = ReceiptSigner::generate();
+
+    // Build five, keep the first three: a genesis-rooted valid prefix, which is
+    // exactly what dropping the tail of an export produces.
+    let mut chain = build_chain(&signer, 5);
+    chain.truncate(3);
+    let path = write_export(&dir, &signer, chain);
+
+    // Without the anchor it passes — this is the hole.
+    let silent = Command::new(BIN).arg(&path).output().expect("run bin");
+    assert_eq!(
+        silent.status.code(),
+        Some(0),
+        "a truncated-but-valid prefix verifies on its own; that is the defect \
+         --expect-count exists to close"
+    );
+
+    // With the anchor it fails.
+    let anchored = Command::new(BIN)
+        .args([&path, "--expect-count", "5"])
+        .output()
+        .expect("run bin");
+    assert_eq!(
+        anchored.status.code(),
+        Some(1),
+        "a chain shorter than the anchored count must fail"
+    );
+    let stderr = String::from_utf8_lossy(&anchored.stderr);
+    assert!(stderr.contains("CHAIN LENGTH MISMATCH"), "stderr: {stderr}");
+    assert!(stderr.contains("expected=5"));
+}
+
+#[test]
+fn expect_count_needs_an_integer_value_exit_2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let signer = ReceiptSigner::generate();
+    let path = write_export(&dir, &signer, build_chain(&signer, 2));
+
+    let out = Command::new(BIN)
+        .args([&path, "--expect-count", "two"])
+        .output()
+        .expect("run bin");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("non-negative integer"));
+}

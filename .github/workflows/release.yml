@@ -52,7 +52,7 @@ jobs:
         #
         # Until then arm64 Linux installs from source:
         #   cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel \
-        #     --tag v2.0.1 --locked iaga-sentinel-core iaga-sentinel-verify
+        #     --tag v2.0.2 --locked iaga-sentinel-core iaga-sentinel-verify
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest

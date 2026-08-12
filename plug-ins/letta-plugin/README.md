@@ -24,8 +24,10 @@ verdict.** The hold is Letta's mechanism, not IAGA enforcement.
 # 1. IAGA sidecar (open mode, no auth) on :4010, and an OSS Letta server on :8283
 docker compose up sentinel letta      # see docker-compose.yml (add your LLM key for Letta)
 
-# 2. register the agent id this plugin reports to, with a policy
-./target/release/iaga import - <<'YAML'
+# 2. register the agent id this plugin reports to, with a policy.
+#    `iaga import` takes a path and reads it with fs::read_to_string — it does not
+#    treat `-` as stdin, so write the file first, then import it.
+cat > letta-demo.policy.yaml <<'YAML'
 profiles:
   - { agentId: letta-demo, workspaceId: ws-letta-demo, framework: letta, role: builder,
       approvedTools: [run_shell], approvedSecrets: [], baselineActionTypes: [shell] }
@@ -35,6 +37,7 @@ workspaces:
       tools: [ { toolName: run_shell, allowedActionTypes: [shell], maxDecision: allow, requiresHumanReview: false } ] }
 vault: []
 YAML
+./target/release/iaga import letta-demo.policy.yaml
 
 # 3. install
 pip install iaga-sentinel-letta letta-client

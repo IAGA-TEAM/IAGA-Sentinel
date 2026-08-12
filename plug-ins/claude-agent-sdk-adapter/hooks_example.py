@@ -1,9 +1,9 @@
 """Govern Claude Agent SDK (Python) tool calls via a PreToolUse hook + IAGA.
 
     pip install claude-agent-sdk iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent first (see README.md), then:
-    python examples/integrations/claude-agent-sdk/hooks_example.py
+    python plug-ins/claude-agent-sdk-adapter/hooks_example.py
 
 The PreToolUse hook inspects each tool call through IAGA Sentinel; block/review
 become a "deny" permission decision. allow lets Claude Code's normal flow run.

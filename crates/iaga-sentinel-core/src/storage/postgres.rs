@@ -19,6 +19,32 @@ impl PostgresStorage {
             .min_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(10))
             .idle_timeout(std::time::Duration::from_secs(300))
+            // D11. Every rendering of a timestamp in this file is
+            // session-`TimeZone`-dependent, and the code assumed UTC without
+            // ever asking for it:
+            //
+            //  * `cost_over_time` truncates with `date_trunc(unit, ts)` and then
+            //    formats with a LITERAL `"Z"` suffix. On a server whose
+            //    `TimeZone` is not UTC the truncation lands on local midnight
+            //    and the label claims it is UTC. The SQLite twin buckets on
+            //    UTC-normalised text, so the two backends silently disagree
+            //    about which bucket a row belongs to while emitting
+            //    byte-identical labels — the divergence is invisible in a diff
+            //    of the two outputs.
+            //  * `created_at::text` (api_keys, tenants, nhi_identities) renders
+            //    a `timestamptz` in the session zone, with an offset that is not
+            //    `+00`, into fields the API documents as UTC.
+            //
+            // Setting it on the connection fixes every one of those at once. A
+            // surgical `AT TIME ZONE 'UTC'` on the bucket query would have left
+            // the three `::text` renders wrong, which is the harder class to
+            // notice because nothing formats a claim about them.
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    sqlx::query("SET TIME ZONE 'UTC'").execute(conn).await?;
+                    Ok(())
+                })
+            })
             .connect(database_url)
             .await
             .map_err(|e| SentinelError::Storage(format!("Failed to connect to PostgreSQL: {e}")))?;
@@ -78,9 +104,21 @@ impl AuditStore for PostgresStorage {
         let provider = event.usage.as_ref().map(|u| u.provider.clone());
         let model = event.usage.as_ref().map(|u| u.model.clone());
 
+        // Supplied, not defaulted — the same reason as SQLite, for a different
+        // failure. `NOW()` here has microsecond resolution so rows do not tie,
+        // but it is the time the write-behind task LANDED, not the time the
+        // decision was made; under load those reorder. Binding the pipeline's
+        // decision time makes `ORDER BY created_at DESC` chronological, and
+        // makes the two backends answer identically for identical traffic
+        // (they did not: `tests/backend_parity.rs` covers the rest, and the
+        // audit read order was the one column where they disagreed).
+        let created_at = chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+
         sqlx::query(
-            "INSERT INTO audit_events (event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json, cost_usd, savings_usd, total_tokens, cache_hit, provider, model)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18)"
+            "INSERT INTO audit_events (event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons, timestamp, usage_json, cost_usd, savings_usd, total_tokens, cache_hit, provider, model, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, $15, $16, $17, $18, $19)"
         )
         .bind(&event.event_id)
         .bind(&event.agent_id)
@@ -100,6 +138,7 @@ impl AuditStore for PostgresStorage {
         .bind(cache_hit)
         .bind(&provider)
         .bind(&model)
+        .bind(created_at)
         .execute(&self.pool)
         .await?;
 
@@ -109,7 +148,7 @@ impl AuditStore for PostgresStorage {
     async fn list(&self, limit: u32) -> Result<Vec<StoredAuditEvent>, SentinelError> {
         let rows = sqlx::query(
             "SELECT event_id, agent_id, tenant_id, framework, action_type, tool_name, decision, risk_score, review_status, reasons::text, timestamp, usage_json
-             FROM audit_events ORDER BY created_at DESC LIMIT $1"
+             FROM audit_events ORDER BY created_at DESC, event_id DESC LIMIT $1"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -137,7 +176,7 @@ impl AuditStore for PostgresStorage {
                AND ($3 = '' OR timestamp >= $3)
                AND ($4 = '' OR timestamp <= $4)
                AND ($5 = '' OR tenant_id = $5)
-             ORDER BY created_at DESC LIMIT $6"
+             ORDER BY created_at DESC, event_id DESC LIMIT $6"
         )
         .bind(&agent)
         .bind(&decision)
@@ -158,13 +197,14 @@ impl AuditStore for PostgresStorage {
             .fetch_one(&self.pool)
             .await?;
 
-        let avg: f64 =
-            sqlx::query_scalar("SELECT COALESCE(AVG(risk_score), 0.0) FROM audit_events")
-                .fetch_one(&self.pool)
-                .await?;
+        let avg: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(AVG(risk_score), 0.0)::double precision FROM audit_events",
+        )
+        .fetch_one(&self.pool)
+        .await?;
 
         let decision_rows = sqlx::query(
-            "SELECT decision, COUNT(*) as cnt FROM audit_events GROUP BY decision ORDER BY cnt DESC",
+            "SELECT decision, COUNT(*) as cnt FROM audit_events GROUP BY decision ORDER BY cnt DESC, decision ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -177,7 +217,10 @@ impl AuditStore for PostgresStorage {
         }
 
         let agent_rows = sqlx::query(
-            "SELECT agent_id, COUNT(*) as cnt FROM audit_events GROUP BY agent_id ORDER BY cnt DESC LIMIT 10",
+            // See the SQLite twin: `cnt DESC` alone leaves the LIMIT 10 boundary
+            // to the planner, so two backends with the same rows can return
+            // different top-tens.
+            "SELECT agent_id, COUNT(*) as cnt FROM audit_events GROUP BY agent_id ORDER BY cnt DESC, agent_id ASC LIMIT 10",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -192,7 +235,7 @@ impl AuditStore for PostgresStorage {
             .collect();
 
         let tool_rows = sqlx::query(
-            "SELECT tool_name, COUNT(*) as cnt FROM audit_events GROUP BY tool_name ORDER BY cnt DESC LIMIT 10",
+            "SELECT tool_name, COUNT(*) as cnt FROM audit_events GROUP BY tool_name ORDER BY cnt DESC, tool_name ASC LIMIT 10",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -226,14 +269,14 @@ impl AuditStore for PostgresStorage {
         let rows = sqlx::query(
             "SELECT agent_id,
                     COUNT(*) as total,
-                    AVG(risk_score) as avg_risk,
+                    AVG(risk_score)::double precision as avg_risk,
                     MAX(timestamp) as last_ts,
                     STRING_AGG(DISTINCT decision, ',') as decisions_csv,
                     STRING_AGG(tool_name, ',') as tools_csv
              FROM audit_events
              WHERE $1 = '' OR agent_id = $1
              GROUP BY agent_id
-             ORDER BY total DESC",
+             ORDER BY total DESC, agent_id ASC",
         )
         .bind(agent_filter)
         .fetch_all(&self.pool)
@@ -415,7 +458,7 @@ impl PostgresStorage {
              FROM audit_events
              WHERE usage_json IS NOT NULL
                AND ($1 = '' OR timestamp >= $1) AND ($2 = '' OR timestamp <= $2)
-             GROUP BY {col} ORDER BY net DESC LIMIT $3",
+             GROUP BY {col} ORDER BY net DESC, k ASC LIMIT $3",
             col = column
         );
         let rows = sqlx::query(&sql)
@@ -499,7 +542,7 @@ impl ReviewStore for PostgresStorage {
     async fn list(&self) -> Result<Vec<ReviewRequest>, SentinelError> {
         let rows = sqlx::query(
             "SELECT id, agent_id, workspace_id, tool_name, decision, status, risk_score, reasons::text, created_at, updated_at
-             FROM review_requests ORDER BY created_at ASC"
+             FROM review_requests ORDER BY created_at ASC, id ASC"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -759,7 +802,7 @@ impl ApiKeyStore for PostgresStorage {
     async fn list_keys(&self) -> Result<Vec<ApiKeyRecord>, SentinelError> {
         use sqlx::Row;
         let rows = sqlx::query(
-            "SELECT id, label, created_at::text, scope FROM api_keys ORDER BY created_at DESC",
+            "SELECT id, label, created_at::text, scope FROM api_keys ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -869,7 +912,7 @@ impl TenantStore for PostgresStorage {
     async fn list_tenants(&self) -> Result<Vec<Tenant>, SentinelError> {
         use sqlx::Row;
         let rows = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata::text, created_at::text FROM tenants ORDER BY created_at",
+            "SELECT tenant_id, name, enabled, metadata::text, created_at::text FROM tenants ORDER BY created_at, tenant_id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -918,8 +961,15 @@ fn pg_row_to_audit(row: &sqlx::postgres::PgRow) -> StoredAuditEvent {
             serde_json::from_value(serde_json::Value::String(s))
                 .unwrap_or(GovernanceDecision::Block)
         },
+        // i32, NOT i64. These columns are declared INTEGER (int4) and sqlx's
+        // Postgres type check is strict equality against INT8, so an i64 read is
+        // REJECTED at decode time and `unwrap_or` silently substitutes the
+        // constant. Measured effect: every row reported riskScore 0.
         risk_score: {
-            let v: i64 = row.try_get("risk_score").unwrap_or(0);
+            let v: i32 = row.try_get("risk_score").unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "risk_score did not decode as i32");
+                0
+            });
             v as u32
         },
         review_status: {
@@ -955,8 +1005,15 @@ fn pg_row_to_review(row: &sqlx::postgres::PgRow) -> ReviewRequest {
                 .unwrap_or(GovernanceDecision::Review)
         },
         status: row.try_get("status").unwrap_or_default(),
+        // i32, NOT i64. These columns are declared INTEGER (int4) and sqlx's
+        // Postgres type check is strict equality against INT8, so an i64 read is
+        // REJECTED at decode time and `unwrap_or` silently substitutes the
+        // constant. Measured effect: every row reported riskScore 0.
         risk_score: {
-            let v: i64 = row.try_get("risk_score").unwrap_or(0);
+            let v: i32 = row.try_get("risk_score").unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "risk_score did not decode as i32");
+                0
+            });
             v as u32
         },
         reasons: {
@@ -1014,12 +1071,23 @@ fn pg_row_to_workspace(row: &sqlx::postgres::PgRow) -> WorkspacePolicy {
             let s: String = row.try_get("tools").unwrap_or_default();
             parse_json_or_warn(&s, "workspace_policies.tools")
         },
+        // The pair that mattered most: both columns are INTEGER, so the i64
+        // read was rejected and EVERY workspace governed at the fallback 70/35
+        // regardless of what it had configured. These feed the verdict
+        // comparisons AND `workspace_policy_hash`, which is bound into every
+        // signed receipt.
         threshold_block: {
-            let v: i64 = row.try_get("threshold_block").unwrap_or(70);
+            let v: i32 = row.try_get("threshold_block").unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "threshold_block did not decode as i32");
+                70
+            });
             v as u32
         },
         threshold_review: {
-            let v: i64 = row.try_get("threshold_review").unwrap_or(35);
+            let v: i32 = row.try_get("threshold_review").unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "threshold_review did not decode as i32");
+                35
+            });
             v as u32
         },
     }
@@ -1131,7 +1199,7 @@ impl NhiStore for PostgresStorage {
 
         let rows = sqlx::query(
             "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities::text, created_at::text
-             FROM nhi_identities ORDER BY created_at"
+             FROM nhi_identities ORDER BY created_at, agent_id"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1217,7 +1285,15 @@ impl NhiStore for PostgresStorage {
     }
 
     async fn prune_expired_challenges(&self) -> Result<usize, SentinelError> {
-        let result = sqlx::query("DELETE FROM nhi_challenges WHERE expires_at < NOW()::text")
+        // `expires_at` is TEXT written from `to_rfc3339()` ("...T...+00:00");
+        // `NOW()::text` renders Postgres ISO style ("... ...+00"). Once the date
+        // parts match, the comparison turns on 'T' (0x54) vs ' ' (0x20) and the
+        // row survives its own 60-second TTL until the DATE advances. It also
+        // renders in the session TimeZone. Format in Rust and bind, as the
+        // SQLite twin already does.
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query("DELETE FROM nhi_challenges WHERE expires_at < $1")
+            .bind(&now)
             .execute(&self.pool)
             .await?;
 

@@ -1,5 +1,5 @@
 # Registers the "crewai-demo" agent.
-#   iaga import examples/integrations/crewai/crewai.policy.yaml
+#   iaga import plug-ins/crewai-adapter/crewai.policy.yaml
 profiles:
   - agentId: crewai-demo
     workspaceId: ws-crewai

@@ -1,16 +1,22 @@
 # Architecture
 
 > **Historical document, describes the v0.4.0 community runtime.**
-> The current 1.x architecture is documented in
+> The current 2.x architecture is documented in
 > [`README.md`](../README.md) (Architecture section) and the
 > OSS↔Enterprise boundary in
 > [`adr/0010-oss-enterprise-boundary.md`](adr/0010-oss-enterprise-boundary.md).
 > Path references in this file (`community/...`) reflect pre-1.0
 > layout; current paths are `crates/iaga-sentinel-core/...`. The pipeline
-> described here is still **8 layers** in 2.x (two of them, sandbox and
-> formal-verify, are advisory and do not change the verdict); 1.0 added four
-> cross-cutting subsystems on top (supply chain attestation, blast radius,
-> behavioral baseline, counterparty trust).
+> described here is still **8 layers** in 2.x, but not all eight decide. The
+> verdict comes from the veto and scoring layers; **sandbox execution, formal
+> policy verification, the behavioural fingerprint, and the session graph's
+> `advisoryScore` are advisory** — reported in the response, never part of the
+> verdict. The session graph's signed `anomalyScore` is a different field and
+> is *not* advisory: it is a term in the composite and escalates to review on
+> its own at 50. Each response carries a machine-readable `layerRoles` map
+> (`veto` / `scoring` / `advisory`) so this is not something a reader has to
+> infer. 1.0 added four cross-cutting subsystems on top (supply chain
+> attestation, blast radius, behavioral baseline, counterparty trust).
 >
 > **Trademarks.** VoltAgent and Letta are trademarks of their
 > respective owners. IAGA Sentinel is independent and not affiliated with, endorsed

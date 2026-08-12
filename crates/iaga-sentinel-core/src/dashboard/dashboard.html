@@ -582,10 +582,19 @@ function renderAgentDetail(){
   const box=$('agent-detail'),id=state.selectedAgentId;if(!id){box.innerHTML=`<div class="empty">Select an agent to inspect it.</div>`;return;}
   const a=(state.data.agents||[]).find(x=>x.agentId===id)||{},fp=state.data._fp||{},rl=state.data._rl||{},dec=a.decisions||{};
   let html=`<h3>${esc(id)}</h3><div class="kv">`
-    +`<div class="row"><span class="k">Requests</span><span class="v">${num(a.totalRequests||fp.totalRequests)}</span></div>`
-    +`<div class="row"><span class="k">Avg / peak risk</span><span class="v">${num(a.avgRiskScore,1)} / ${num(fp.peakRiskScore,1)}</span></div>`
+    +`<div class="row"><span class="k">Requests${a.totalRequests==null&&fp.totalRequests!=null?' <span class="chip" title="Advisory: analytics has no row for this agent, so this count comes from the behavioural fingerprint instead.">adv</span>':''}</span><span class="v">${num(a.totalRequests??fp.totalRequests)}</span></div>`
+    +`<div class="row"><span class="k">Avg risk</span><span class="v">${num(a.avgRiskScore,1)}</span></div>`
     +`<div class="row"><span class="k">Trust</span><span class="v">${num(a.trustScore,2)}</span></div>`
-    +`<div class="row"><span class="k">Anomaly</span><span class="v">${num(fp.anomalyScore,2)}</span></div>`
+    /* The fingerprint records the ADAPTIVE layer's composite, not the final
+       governance score, so its peak is a different metric from the average
+       above and can legitimately sit below it. It used to be pasted next to
+       that average as "Avg / peak risk", where it read as "the worst risk this
+       agent scored" and under-reported it (measured: 26 shown, 86 actual).
+       Now its own row, carrying the same `adv` chip as Anomaly below — a
+       convention this uncommitted change set establishes on both rows rather
+       than one it inherits from the released console. */
+    +`<div class="row"><span class="k">Peak adaptive score <span class="chip" title="Advisory: the highest value the ADAPTIVE layer's composite has reached for this agent — not the peak of the final governance risk score, and typically lower. The adaptive composite is a scoring input (weighted 0.20); this peak of it is a fingerprint aggregate that no receipt carries.">adv</span></span><span class="v">${num(fp.peakRiskScore,1)}</span></div>`
+    +`<div class="row"><span class="k">Anomaly <span class="chip" title="Advisory: the behavioural fingerprint's anomaly score, reported and never part of a signed verdict. Not the session graph, whose attack signatures DO veto — only its advisory score does not.">adv</span></span><span class="v">${num(fp.anomalyScore,2)}</span></div>`
     +`<div class="row"><span class="k">Decisions</span><span class="v">${num(dec.allow)} / ${num(dec.review)} / ${num(dec.block)}</span></div>`
     +`<div class="row"><span class="k">Rate (min / hr)</span><span class="v">${num(pick(rl,'requests_this_minute','requestsThisMinute'))} / ${num(pick(rl,'requests_this_hour','requestsThisHour'))}</span></div></div>`;
   if(fp.hourlyPattern&&fp.hourlyPattern.length)html+=`<h3 class="section-gap">Hourly pattern (UTC)</h3>${spark(fp.hourlyPattern)}`;

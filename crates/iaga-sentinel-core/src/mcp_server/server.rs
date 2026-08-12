@@ -211,7 +211,8 @@ fn tool_definitions() -> Vec<McpToolInfo> {
                  Returns allow | review | block plus risk and signed evidence. \
                  action.payload should carry the target tool's fields — filesystem.read: {path}; \
                  filesystem.write: {path, content}; terminal.exec: {command}; \
-                 http.fetch: {method, destination}. An `intent` string is optional but recommended \
+                 http.fetch: {method, and a destination under any of destination/url/uri/ \
+                 endpoint/href/target/webhook}. An `intent` string is optional but recommended \
                  (it enriches the receipt; it is not required and never causes a block on its own)."
                     .to_string(),
             ),
@@ -243,7 +244,7 @@ fn tool_definitions() -> Vec<McpToolInfo> {
                             "toolName": { "type": "string" },
                             "payload": {
                                 "type": "object",
-                                "description": "Target tool's fields. filesystem.read: {path}; filesystem.write: {path, content}; terminal.exec: {command}; http.fetch: {method, destination}. Optional `intent` (string) is recommended for the evidence trail but never required."
+                                "description": "Target tool's fields. filesystem.read: {path}; filesystem.write: {path, content}; terminal.exec: {command}; http.fetch: {method, plus a destination under any of destination/url/uri/endpoint/href/target/webhook}. Optional `intent` (string) is recommended for the evidence trail but never required."
                             }
                         }
                     }
@@ -349,6 +350,7 @@ mod tests {
                     allowed_action_types: vec![ActionType::FileRead],
                     max_decision: crate::core::types::GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 }],
                 allowed_domains: vec![],
                 threshold_block: 70,

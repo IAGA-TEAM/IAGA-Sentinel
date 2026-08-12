@@ -20,6 +20,19 @@
           "toolName": "filesystem.read",
           "allowedActionTypes": ["file_read"],
           "maxDecision": "allow"
+        },
+        {
+          "toolName": "http.fetch",
+          "allowedActionTypes": ["http"],
+          "maxDecision": "allow",
+          "destinationFields": [
+            "destination",
+            "url",
+            "uri",
+            "endpoint",
+            "href",
+            "target"
+          ]
         }
       ],
       "thresholdBlock": 70,

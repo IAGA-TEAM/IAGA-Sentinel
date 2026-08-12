@@ -66,6 +66,7 @@ fn workspace() -> WorkspacePolicy {
         allowed_action_types: vec![at],
         max_decision: GovernanceDecision::Allow,
         requires_human_review: false,
+        ..Default::default()
     };
     WorkspacePolicy {
         workspace_id: WS.into(),

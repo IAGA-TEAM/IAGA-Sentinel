@@ -5,14 +5,14 @@ See plug-ins/langchain-adapter/ for a runnable example.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ..types import ActionType
 from ._common import (
     AdapterConfig,
     _safe_value,
     build_request,
-    infer_action_type,
+    resolve_action_type,
     inspect_async,
     inspect_sync,
 )
@@ -60,6 +60,7 @@ class SentinelCallbackHandler:
         session_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         fail_closed: bool = False,
+        action_types: Optional[Mapping[str, ActionType]] = None,
     ):
         self._config = AdapterConfig(
             agent_id=agent_id,
@@ -71,20 +72,24 @@ class SentinelCallbackHandler:
             session_id=session_id,
             metadata=metadata,
             fail_closed=fail_closed,
+            action_types=action_types,
         )
 
     def guard_tool(
         self,
         tool_name: str,
         payload: dict[str, Any],
-        action_type: ActionType = ActionType.CUSTOM,
+        action_type: Optional[ActionType] = None,
     ) -> None:
         inspect_sync(
             self._config,
             build_request(
                 self._config,
                 tool_name=tool_name,
-                action_type=action_type,
+                action_type=action_type
+                or resolve_action_type(
+                    self._config, tool_name, default=ActionType.CUSTOM
+                ),
                 payload=payload,
             ),
         )
@@ -93,14 +98,17 @@ class SentinelCallbackHandler:
         self,
         tool_name: str,
         payload: dict[str, Any],
-        action_type: ActionType = ActionType.CUSTOM,
+        action_type: Optional[ActionType] = None,
     ) -> None:
         await inspect_async(
             self._config,
             build_request(
                 self._config,
                 tool_name=tool_name,
-                action_type=action_type,
+                action_type=action_type
+                or resolve_action_type(
+                    self._config, tool_name, default=ActionType.CUSTOM
+                ),
                 payload=payload,
             ),
         )
@@ -112,7 +120,7 @@ class SentinelCallbackHandler:
         **kwargs: Any,
     ) -> None:
         tool_name = str(serialized.get("name") or serialized.get("id") or "langchain.tool")
-        action_type = infer_action_type(tool_name)
+        action_type = resolve_action_type(self._config, tool_name)
         payload = _tool_payload(input_str, kwargs)
         self.guard_tool(tool_name, payload, action_type=action_type)
 
@@ -123,7 +131,7 @@ class SentinelCallbackHandler:
         **kwargs: Any,
     ) -> None:
         tool_name = str(serialized.get("name") or serialized.get("id") or "langchain.tool")
-        action_type = infer_action_type(tool_name)
+        action_type = resolve_action_type(self._config, tool_name)
         payload = _tool_payload(input_str, kwargs)
         await self.aguard_tool(tool_name, payload, action_type=action_type)
 

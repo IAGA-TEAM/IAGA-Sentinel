@@ -12,20 +12,21 @@ tool function, or call `SentinelClient.inspect(...)` directly.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/custom/custom.policy.yaml
+./target/release/iaga import plug-ins/custom-adapter/custom.policy.yaml
 ```
 
 ## 3. Run
 
 ```bash
 pip install iaga-sentinel
-python examples/integrations/custom/python_example.py
+python plug-ins/custom-adapter/python_example.py
 ```
 
 ```python

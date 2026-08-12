@@ -15,10 +15,10 @@ See plug-ins/langgraph-adapter/ for a runnable example.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ..types import ActionType
-from ._common import AdapterConfig, build_request, infer_action_type, inspect_sync
+from ._common import AdapterConfig, build_request, inspect_sync, resolve_action_type
 
 
 def _make_tool_message(content: str, name: str, tool_call_id: str) -> Any:
@@ -65,6 +65,7 @@ class GovernedToolNode:
         session_id: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         fail_closed: bool = False,
+        action_types: Optional[Mapping[str, ActionType]] = None,
         action_type: Optional[ActionType] = None,
     ):
         self._tools = {
@@ -81,6 +82,7 @@ class GovernedToolNode:
             session_id=session_id,
             metadata=metadata,
             fail_closed=fail_closed,
+            action_types=action_types,
         )
 
     @staticmethod
@@ -96,7 +98,7 @@ class GovernedToolNode:
 
     def _guard(self, name: str, args: Any) -> None:
         payload = dict(args) if isinstance(args, dict) else {"input": args}
-        action_type = self._action_type or infer_action_type(name)
+        action_type = self._action_type or resolve_action_type(self._config, name)
         # Raises PermissionError on block/review; fail-open on transport errors.
         inspect_sync(
             self._config,

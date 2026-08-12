@@ -858,7 +858,15 @@ async fn sandbox_pending_handler() -> Json<Vec<serde_json::Value>> {
     Json(json)
 }
 
-async fn sandbox_approve_handler(Path(id): Path<String>) -> impl IntoResponse {
+/// Approving a sandboxed action releases work the pipeline held back for a
+/// human, so it is an administrative decision - the same reasoning as
+/// `risk_weights_reset_handler` and `reload_plugins_handler`. Without
+/// `RequireAdmin` any agent-scoped key could approve the very action it was
+/// stopped from taking.
+async fn sandbox_approve_handler(
+    _admin: RequireAdmin,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     match sandbox_executor::approve_sandbox(&id) {
         Some(r) => (
             StatusCode::OK,
@@ -873,7 +881,7 @@ async fn sandbox_approve_handler(Path(id): Path<String>) -> impl IntoResponse {
     }
 }
 
-async fn sandbox_reject_handler(Path(id): Path<String>) -> impl IntoResponse {
+async fn sandbox_reject_handler(_admin: RequireAdmin, Path(id): Path<String>) -> impl IntoResponse {
     match sandbox_executor::reject_sandbox(&id) {
         Some(r) => (
             StatusCode::OK,

@@ -4,7 +4,7 @@
 # Without this, an unregistered agentId returns 404 (the hook then fails open),
 # and unknown tool names get escalated. Import it before using the hook:
 #
-#     iaga import examples/integrations/claude-code/claude-code.policy.yaml
+#     iaga import plug-ins/claude-code-adapter/claude-code.policy.yaml
 #
 # or copy it to ./iaga-sentinel.yaml, which the server auto-imports on boot.
 #

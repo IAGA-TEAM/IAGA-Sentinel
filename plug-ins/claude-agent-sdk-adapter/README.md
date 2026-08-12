@@ -13,19 +13,20 @@ map to deny); `allow` → the call proceeds and a signed receipt is produced.
 Transport errors fail open by default.
 
 > If you use Claude **Code** (the CLI) rather than the SDK, use the
-> `PreToolUse` command hook in `../claude-code/` instead.
+> `PreToolUse` command hook in `../claude-code-adapter/` instead.
 
 ## Setup
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 Register the agent so its tool names are known (unregistered agents return 404):
 
 ```bash
-./target/release/iaga import examples/integrations/claude-agent-sdk/claude-agent-sdk.policy.yaml
+./target/release/iaga import plug-ins/claude-agent-sdk-adapter/claude-agent-sdk.policy.yaml
 ```
 
 ## Run

@@ -15,7 +15,234 @@ early-access list.
 
 ---
 
-## [Unreleased]
+## [2.0.2], 2026-08-10 — The Thresholds Postgres Never Read
+
+Follow-up hardening after a live 76-request attack-suite case study. Two attacks got through, both
+design gaps rather than implementation bugs; the rest of this is closing those, giving the layers
+that changed the tests they never had, and running the Postgres proofs that had only been read.
+Running them is what turned up the heaviest item in this release: a Postgres deployment was being
+governed at the default thresholds no matter what its policy said.
+
+**Compatibility.** The signed receipt **wire format** is unchanged, and existing chains verify
+byte-for-byte — measured in all four directions, generating a chain with the 2.0.1 binary and
+verifying it with the 2.0.2 `iaga-verify` and vice versa. `auditEvent.reasons` is unchanged in
+content and order for identical traffic.
+
+**What a consumer can observe changing**, in rough order of how much it matters:
+
+1. **Postgres verdicts move.** Workspace thresholds were being read back as the built-in
+   `70`/`35` regardless of configuration (see Fixed). A Postgres deployment that ever set custom
+   thresholds will now be governed by them — which is the point, and is still a change in what the
+   product blocks. SQLite is unaffected. `riskScore` on `/v1/audit` and `/v1/reviews` also stops
+   reading back as `0`, and `workspace_policy_hash` changes for any policy whose thresholds were
+   not the defaults, so **new** receipts on Postgres carry a different `policyHash` than before.
+2. **`/v1/inspect` gains two fields**: `layerRoles` (always present) and
+   `taintAnalysis.correlationScope`. Additive, but a strict schema validator will see them.
+3. **`risk.reasons` carries more entries** — the Dictum and cost-control attributions now reach the
+   caller, so code that counts or exact-matches that array sees more lines. The review queue
+   (`GET /v1/reviews`) shows the same lines.
+4. **`POST /v1/sandbox/{id}/approve` and `/reject` now require an admin key**; an `agent`-scoped key
+   that used to get `200` gets `403 admin_scope_required`.
+5. **`audit_events.created_at` is the pipeline's decision time**, not the moment the write-behind
+   task landed, so the audit read order changes for rows written inside the same second.
+6. **`GET /v1/cost/over-time?bucket=day` on SQLite** now returns `2026-08-09T00:00:00Z` where it
+   returned `2026-08-09`, matching Postgres.
+7. **The MCP `tools/list` description text changed** for `http.fetch`, and the schema now accepts
+   seven destination names where it demanded `destination`.
+8. **`iaga validate` and `iaga import` print policy lint output** they did not print before. Exit
+   codes are unchanged; on the configs shipped in this repo the new output is one
+   `warning [medium] incomplete_coverage`.
+9. **The Python `@governed` decorator no longer sends `ctx`/`context`** (under Changed), and the
+   Helm chart's `image.tag` no longer has a default (under Fixed).
+
+### Added
+
+- **Per-tool egress destination declaration.** A `ToolPolicy` can declare `destinationFields` — the
+  payload keys that carry its egress target. When declared, the domain allowlist is applied
+  fail-closed: a payload that exposes none of those keys is refused rather than skipping the
+  allowlist. Undeclared tools keep the legacy four-name probe (`destination`/`url`/`endpoint`/`href`),
+  so an LLM SDK call whose endpoint is baked into the client is unaffected. The shipped example
+  policies (`iaga-sentinel.config.json`, `iaga-sentinel.example.yaml`) now declare it for `http.fetch`.
+- **`layerRoles`** on every inspect response and in the SDKs (Python `layer_roles` +
+  `is_advisory_layer`, TypeScript `layerRoles`): a machine-readable map marking each layer `veto`,
+  `scoring`, or `advisory`, so a consumer is not left to infer that the sandbox result, the
+  behavioural fingerprint, and the session graph's `advisoryScore` cannot move a verdict. The
+  session graph's *other* score, the signed `anomalyScore`, is not advisory: it is a term in the
+  composite and escalates to review on its own at 50.
+- **Opt-in agent-scoped taint correlation** (`IAGA_SENTINEL_TAINT_AGENT_WINDOW_SECS`, default off):
+  folds the `secret` label an agent accumulated in its other sessions into the current one, within a
+  window, so rotating a client-declared `sessionId` between reading a credential and sending it out no
+  longer erases the link. Only `secret` crosses a session boundary, and only into a request carrying a
+  body, so ordinary read-then-fetch work is unaffected — measured 19/19 attacks blocked with 0 false
+  positives on 43 benign controls. Kept opt-in because the store is per-process (best-effort behind
+  multiple replicas). Documented in openapi (`TaintCorrelationScope`), the Helm chart, and surfaced on
+  every response as `taintAnalysis.correlationScope`.
+- **`iaga-verify --expect-count <n>`**: fails a tail-truncated chain. `CHAIN OK` proves prefix
+  integrity, not completeness; the expected length is an external anchor, deliberately not part of the
+  signed bytes.
+- **Postgres integration coverage.** `tests/backend_parity.rs` round-trips the four `INTEGER` columns
+  that `pg_row_*` decode (thresholds, audit risk, review risk) against a live database, and a
+  `clippy --features postgres` CI leg lints the backend that was previously never linted. Migration
+  `0007` adds the composite indexes for the audit read path.
+
+### Changed
+
+- **`@governed` no longer sends arguments named `ctx` or `context`** to the sidecar. The decorator now
+  shares `named_payload` with the adapters, whose default exclude is `("self", "ctx", "context")`.
+  Excluding `self` was the point (an instance repr, potentially holding a credential, was reaching the
+  signed receipt's input hash); excluding `context` is a real, if small, reduction in the governed
+  surface. A tool that needs a `context` argument governed should pass it under a different name.
+
+### Fixed
+
+- **Postgres was governing every workspace at the default thresholds, ignoring its own policy.**
+  `pg_row_to_workspace` decoded `threshold_block` and `threshold_review` as `i64` from columns
+  declared `INTEGER` (`migrations/postgres/0001_initial.sql`). sqlx's Postgres decode is
+  strict-equality on the type OID, so every read was rejected and the `unwrap_or(70)` / `unwrap_or(35)`
+  fallback stood in — silently, because the fallback is the same value as the default. Measured: a
+  workspace stored as `threshold_block=40, threshold_review=20` in the database read back as
+  `70`/`35` through the 2.0.1 binary and as `40`/`20` through this one. The same class of decode
+  applied to `risk_score` on `/v1/audit` and `/v1/reviews`, which is why both reported `0` on
+  Postgres. **This moves verdicts on Postgres** — see the Compatibility note above. Fixed by
+  decoding the four columns as `i32`, with a logged fallback rather than a silent one, and pinned by
+  `tests/backend_parity.rs` against a live database.
+- **Egress allowlist bypass by field name.** A payload naming its destination `target` (or any name
+  outside the legacy four) skipped the domain allowlist entirely. Closed by `destinationFields` above;
+  an un-migrated workspace now gets a Review escalation via a narrow top-level URL sweep (scheme-
+  qualified, content-bearing keys excluded, `Http` actions only) rather than a silent allow.
+- **That sweep could be made to panic, and a panicked request left no evidence.** Rewinding to the
+  start of a URL used `rfind(...).map(|i| i + 1)` on a match of `char::is_whitespace` — the Unicode
+  property, so it matches multi-byte spaces (U+00A0, U+2000–U+200A, U+3000). On one of those, `i + 1`
+  lands inside the character and the following slice panics. Since the sweep reads every top-level
+  string on every `Http` action, any caller of `/v1/inspect` could send it: the task died, the
+  connection closed with no response at all, and **no audit event was written** — a governed action
+  with neither a verdict nor a receipt. Found and fixed before release, stepping by the matched
+  character's own width, with a test that fails on the panic.
+- **The shipped example allowlist used wildcards, which match nothing.**
+  `iaga-sentinel.example.yaml` listed `*.openai.com` and `*.github.com`; `allowed_domains` is
+  compared for host equality after normalisation, with no glob support, so anyone who copied that
+  file had every call to those hosts refused by the egress rule. Replaced with the bare hosts
+  (`api.openai.com`, `api.github.com`) and a comment saying there is no wildcard support.
+- **The Helm chart shipped an `image.tag` default pointing at an image that does not exist.** A
+  plain `helm install` rendered a valid-looking reference to `ghcr.io/iaga-team/iaga-sentinel`, an
+  unpublished package, so the first symptom was a pod in `ImagePullBackOff`. `image.tag` now has no
+  default and the template calls `required`, so the render refuses with a message naming the value
+  and what to set. Chart version `0.1.0` → `0.2.0`; CI renders with an explicit tag and asserts the
+  refusal.
+- **`LayerRole` was not exported from the TypeScript package root.** `GovernanceResult.layerRoles`
+  is typed `Record<string, LayerRole>`, but `src/index.ts` re-exports a named list that omitted the
+  interface, so a consumer could read the field and not name its type without a deep import.
+- **`AGENTS.md` endorsed seven destination key names that its own example policy cannot read.** The
+  MCP schema and the workspace egress layer accept `destination`/`url`/`uri`/`endpoint`/`href`/
+  `target`/`webhook`, but the shipped Dictum rule — the one `scripts/agent_bootstrap.*` writes and
+  §0 tells every agent to run first — reads `url_host(action.payload.destination)` only. `url_host()`
+  errors on the other six, and an erroring `when` on a `block` rule is a documented fail-closed fire,
+  so a credential-free `GET` under `uri` was refused with `dictum-eval-error` — a refusal written
+  into the signed `auditEvent.reasons` under a rule name about credential egress that never matched.
+  **Fixed by reordering the shipped rule**: `secret_ref(action.payload)` now comes before
+  `url_host(...)`, and because `and` short-circuits, a call with no credential never reaches the
+  erroring builtin. A call that does carry one still evaluates it, so an alias there still fails
+  closed — the protection is unchanged and only the false refusal is gone. Measured with the demo
+  workspace declaring all seven names: a credential-free `GET` under `uri` or `webhook` to an
+  allowlisted host went from **block with `dictum-eval-error`** to **allow**, while `uri` to a
+  non-allowlisted host stays blocked and now names the host. Changed in `AGENTS.md` §11b and in the
+  policy both `scripts/agent_bootstrap.*` generate, with the reasoning inline so the order is not
+  "tidied" back. Declaring `destinationFields` on the workspace policy remains the way to actually
+  *cover* the other six names; the two are complementary. Dictum still has no coalescing builtin.
+- **Audit read paths were not totally ordered.** `/v1/audit`, `/v1/audit/export`, `/v1/audit/stats`
+  and the cost top-N ordered by a non-unique key with no tie-break, so paging was nondeterministic and
+  the two backends could disagree. Tie-breaks added across both backends, with the first tests for it.
+- **…and, once totally ordered, still not ordered by TIME.** The tie-break made the read
+  reproducible; it did not make it chronological. `created_at` was left to the SQLite column
+  default, `datetime('now')` — whole seconds — and the INSERT never supplied it, so every row
+  written inside one second tied and `event_id DESC`, a UUID, became the real order. Measured on
+  five sequential live requests: the newest event came back **fourth**, and the returned order
+  matched `sorted(event_id, reverse=True)` exactly. Postgres has microsecond `NOW()` and did not
+  tie, so the same traffic produced a different order on each backend. Both INSERTs now supply
+  `created_at` from the pipeline's own decision time, so the audit is ordered by when the action
+  happened rather than when the write-behind task landed, and the two backends agree. The
+  tie-break stays as the last resort it was meant to be.
+- **The operator console reported a risk "peak" lower than its own average.** The agent panel's
+  `Avg / peak risk` row read the average from `/v1/analytics/agents` (the final governance score)
+  and the peak from the behavioural fingerprint, which records the *adaptive layer's* composite —
+  two different metrics under one label. Measured on one agent: the row said `36.1 / 26.0` while
+  the agent's worst actual risk was **86**, a 3.3x under-report on the screen an operator opens to
+  ask exactly that question. The peak is now its own row, named **Peak adaptive score** and marked
+  `adv`, and the `Requests` row is marked too when its number falls back to the fingerprint. No
+  API or receipt field changed; this is what the console shows.
+- **Postgres timestamp rendering assumed UTC without asking for it.** The pool now sets
+  `TIME ZONE 'UTC'` on connect, fixing `date_trunc` cost buckets (which glued a literal `"Z"` onto a
+  session-local truncation) and the `created_at::text` renders.
+- **`policyVerification` is advisory, and an earlier draft of `layerRoles` in this same change set
+  said veto.** It lints the workspace policy and is never read back into the decision. To be exact
+  about what shipped: 2.0.1 published *no* role for this layer at all — `docs/openapi.yaml` said
+  only "L6 formal policy verification result" — so this corrects a draft of the new table, not a
+  claim any released version made. Pinned by `tests/layer_roles_openapi_parity.rs`.
+- **The session graph's `anomalyScore` is decisive, and the prose describing it drifted while this
+  table was being written.** `execute_pipeline` assigns it to `layer_risks.session_graph` and
+  escalates to review on its own at 50; the advisory field is the separate `advisoryScore`. Again to
+  be exact: 2.0.1 called neither field advisory — the sentence that did appeared in the files this
+  change set added and edited (`layerRoles`, both SDKs, `ARCHITECTURE.md`). Understating what is
+  inside a signed verdict is the same defect class as 2.0.1's overstating, in the worse direction,
+  which is why it is pinned by a new test tying the published prose to the field names rather than
+  simply reworded.
+- **`layerRoles` said the plugin layer "cannot veto on its own". It can, twice.**
+  `execute_pipeline` sets `minimum_decision = Block` from a plugin's `decision_hint`, and again when
+  `layer_risks.plugins` reaches the workspace block threshold — a comparison on the plugin's own
+  scale, so the 0.10 composite weight the note reasoned about does not bound it. A plugin error
+  escalates to review. Corrected, `role` moved from `scoring` to `veto`, and pinned by a test that
+  asserts the pipeline still grants the veto before policing the claim.
+- **The sentence introducing `layerRoles` counted three inert layers where there are four.** Of the
+  ten layer blocks, `sandboxResult`, `behavioralFingerprint`, `telemetrySpan` **and**
+  `policyVerification` cannot move a verdict; the list named the first two plus
+  `sessionGraph.advisoryScore`, which is a sub-field rather than one of the ten. Undercounting them
+  invites a reader to count more defences than exist. The count is now derived from `layer_roles()`
+  by a test rather than maintained by hand, in `types.rs`, `openapi.yaml` and both SDKs.
+- **The MCP schema for `http.fetch` accepted seven destination names; the egress probe read four.**
+  Widening the schema (so a `{method, url}` MCP call is no longer refused before the policy layer can
+  host-check it) opened a gap for `uri`, `target` and `webhook`: on a workspace that has not adopted
+  `destinationFields`, a BARE host under those names cleared schema validation, was not read by the
+  legacy probe, and was skipped by the tier-3 sweep, which requires a scheme. Measured: `{method:
+  GET, uri: "attacker.example"}` went from Block to a finding-less **Allow**. The sweep now reads a
+  scheme-less value when the key is itself a destination name and the value is host-shaped. Measured
+  on the 43-case benign corpus: **0 new false positives**, and one attack that had been caught by the
+  threat feed alone is now independently caught by the policy layer too.
+- **A tier-3 egress finding contradicted its own verdict, and was signed.** The sweep never received
+  the declaration it is named for, so on a declaring tool it re-found the key tier 1 had just refused
+  and pushed a second finding stating the key was undeclared and that the request was "escalating for
+  human review" — both false on a Block. `risk.reasons` carries this into `auditEvent.reasons`, which
+  is signed. Declared keys are now excluded and the escalation wording is conditional.
+- **`GET /v1/audit/export?tenant_id=` was accepted and ignored on SQLite**, the default backend: the
+  filter was destructured and never used, and the column was missing from the projection, so an
+  exported row serialized `"tenantId": null` where Postgres returned the real value. Not a
+  confidentiality fix — the endpoint is admin-only, `AuthContext` carries no tenant, and `/v1/audit`
+  already returns every tenant to the same caller — but a documented filter that did not filter, and
+  a cross-backend divergence. First test added.
+- **`POST /v1/sandbox/{id}/approve` and `/reject` are now admin-only.** Releasing or refusing a
+  contained action is an operator decision, not one the governed agent makes about itself. The
+  operator console is admin-authenticated, so no realistically-configured console regresses; an
+  `agent`-scoped key now gets `403 admin_scope_required`. Added to the scope e2e test.
+- **The two backends labelled the same daily cost bucket differently.** `GET
+  /v1/cost/over-time?bucket=day` returned `2026-08-09` on SQLite and `2026-08-09T00:00:00Z` on
+  Postgres for identical data; they already agreed on `bucket=hour`. SQLite now emits the Postgres
+  form, so the label is RFC3339 on both. A consumer that string-matched the bare date on SQLite sees
+  the fuller form.
+- **`import iaga_sentinel` eagerly imported nine framework adapters** because the decorator imported
+  its helpers from `adapters/`. The generic helpers moved to `iaga_sentinel._payload`; the package now
+  imports no adapter.
+
+### Notes on what did not change, and what is still open
+
+- The adaptive layer's score-driven block arm is **removed in this release** (2.0.1 still had
+  `total_score >= 70 => "block"`). No verdict moves, because it was unreachable: its signed ceiling
+  is below the block threshold at
+  default weights. Admin feedback (`POST /v1/risk/feedback`) can renormalise the weights and lift that
+  ceiling, but still cannot block — the decision carries no score arm to reach. Now stated precisely in
+  `layerRoles` and openapi, with a test pinning the drift.
+- `POST /v1/nhi/challenge` persists nothing to Postgres: `create_challenge` writes only the in-memory
+  map, and the durable `store_challenge` has no caller, so challenges do not survive a restart. Found
+  while running the Postgres prune proof; reported here rather than silently changed, since wiring
+  durable challenges has restart semantics that belong in their own change.
 
 ---
 
@@ -180,6 +407,15 @@ which is the data loss the script's own header documents.
   `docker-compose.yml` files, `plug-ins/README.md`, `README.md` and `AGENTS.md` now all point at the
   namespace releases actually land in, at `v2.0.1`. Tags published before 1.9.0 under the old
   namespace still resolve; nothing new is pushed there.
+
+  > **Correction (2026-08-09).** The sentence above — "Since 1.9.0 CI publishes to
+  > `ghcr.io/iaga-team/iaga-sentinel`" — is wrong, and was wrong when it was written. That
+  > namespace has never held a package: the `v2.0.1` tag push uploaded every layer and then failed
+  > the manifest with HTTP 403, for organisation-side reasons recorded in
+  > `.github/workflows/docker.yml`. Measured again on 2026-08-09:
+  > `docker pull ghcr.io/iaga-team/iaga-sentinel:latest` returns `unauthorized`, and the registry
+  > refuses an anonymous token. The user-facing quickstarts now build the image locally; the deploy
+  > manifests still name the intended coordinates and say plainly that you must supply the image.
 - **The repository URL is now consistently `IAGA-TEAM/IAGA-Sentinel`.** Two identities had been
   coexisting: `README.md`'s install command and `AGENTS.md` pointed at the org, while `Cargo.toml`
   `repository`, `CITATION.cff`, `CONTRIBUTING.md`'s clone line, `docs/openapi.yaml`, the Helm chart's
@@ -492,6 +728,9 @@ This release also folds in the community pull requests merged since 1.8.1
 - **Helm chart and Kubernetes manifests** (#5), with the signer key on a
   writable volume so receipts can be generated under a read-only root
   filesystem.
+  > **Correction (2026-08-09).** Wherever this release's notes say images
+  > publish under `ghcr.io/iaga-team/iaga-sentinel`, they are wrong: that
+  > package has never existed. See the correction under [Unreleased].
 - CI now renders the Helm chart on every run: default values, a bring-your-own
   Secret, a supplied policy, and a rejected hex signer key.
 

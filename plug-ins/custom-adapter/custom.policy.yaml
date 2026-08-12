@@ -1,5 +1,5 @@
 # Registers the "custom-agent" used by python_example.py.
-#   iaga import examples/integrations/custom/custom.policy.yaml
+#   iaga import plug-ins/custom-adapter/custom.policy.yaml
 profiles:
   - agentId: custom-agent
     workspaceId: ws-custom

@@ -32,6 +32,7 @@ curl -fsS -X POST "$BASE/v1/risk/weights/reset" >/dev/null 2>&1 || true
 SCEN="$(curl -fsS "$BASE/v1/demo/scenarios")"
 
 fail=0
+BEATS=0
 run_beat() { # $1=index(0..2) $2=expect $3=label
   local idx="$1" exp="$2" label="$3" req resp dec score
   req="$(echo "$SCEN" | jq -c --arg sid "$SID" ".[$idx].request + {metadata:{sessionId:\$sid}}")"
@@ -45,6 +46,7 @@ run_beat() { # $1=index(0..2) $2=expect $3=label
     echo "   ASSERTION FAILED: expected $exp, got $dec"
     fail=1
   fi
+  BEATS=$((BEATS + 1))
 }
 
 run_beat 0 allow  "Safe MCP-aligned repo read";   sleep "$PAUSE"
@@ -63,9 +65,27 @@ echo "== MONEY SHOT - OFFLINE PROOF (no server, no DB, just a file + a key) =="
 PUB="$(jq -r .signer_verifying_key "$CHAIN")"
 RUN="$(jq -r .run_id "$CHAIN")"
 CNT="$(jq '.receipts | length' "$CHAIN")"
-echo "  run_id=$RUN  receipts=$CNT  (seq 0,1,2 = Allow, Review, Block)"
+# How many receipts THIS take is entitled to. run_id is <agentId>:<sessionId>
+# and the sessionId is fixed, so a second run against a server that is still up
+# appends to the same chain: the export comes back with 6 receipts while every
+# verdict assertion still passes, because the verdicts really were
+# Allow/Review/Block both times. --expect-count is the external anchor that
+# turns that into a failure instead of a green CHAIN OK over the wrong chain.
+EXPECTED="$BEATS"
+echo "  run_id=$RUN  receipts=$CNT  (this take drove $EXPECTED: Allow, Review, Block)"
 echo "> iaga-verify $CHAIN"
 "$VERIFY" "$CHAIN"
-echo "> iaga-verify $CHAIN --key <pinned>"
-"$VERIFY" "$CHAIN" --key "$PUB"
+# The key comes from chain.json itself, so it silences the self-asserted
+# warning rather than authenticating authorship; pin a key you got out of band
+# for that. --expect-count IS an external anchor: it is what this driver drove.
+echo "> iaga-verify $CHAIN --key <from-the-export> --expect-count $EXPECTED"
+if ! "$VERIFY" "$CHAIN" --key "$PUB" --expect-count "$EXPECTED"; then
+  if [[ "$CNT" != "$EXPECTED" ]]; then
+    echo "   The chain holds $CNT receipts but this take drove $EXPECTED. A stale server is"
+    echo "   still up and the previous take is chained into the same run_id: stop it, then"
+    echo "   re-run ./scripts/demo.sh (it wipes the DB and re-seeds)."
+  fi
+  echo "STOP: offline verification failed - do NOT use this take."
+  exit 1
+fi
 echo "CHAIN OK (offline) - terminal verdict BLOCK, run_id=$RUN"

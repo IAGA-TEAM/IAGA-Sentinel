@@ -153,6 +153,80 @@ pub struct ToolPolicy {
     pub max_decision: GovernanceDecision,
     #[serde(default)]
     pub requires_human_review: bool,
+    /// Payload keys that carry this tool's egress destination, in priority
+    /// order. Declaring them turns the domain allowlist from best-effort into
+    /// fail-closed for THIS tool: a payload exposing none of them is blocked
+    /// rather than allowed (see `evaluate_policy`).
+    ///
+    /// Empty means "not declared", which keeps the legacy behaviour: a fixed
+    /// `destination`/`url`/`endpoint`/`href` probe that silently skips the
+    /// allowlist when it finds nothing. That fallback is why this field exists,
+    /// and why the default must stay empty rather than become a guess.
+    ///
+    /// # Why per-tool and not per-action-type
+    ///
+    /// The obvious version of this fix — fail closed on any `Http` action with
+    /// no recognisable destination — shipped as `fe52454` and was reverted by
+    /// `ad51406` four days later, because it blocked `openai.chat.completions
+    /// .create`: an HTTP action whose destination lives in the SDK, not in the
+    /// payload. The discriminator is not the action type but whether THIS tool
+    /// takes a caller-controlled destination, which is per-tool information and
+    /// belongs here.
+    ///
+    /// # Why `skip_serializing_if`
+    ///
+    /// `pipeline::policy_hash::workspace_policy_hash` digests the whole
+    /// serialized `WorkspacePolicy`, and that digest is bound into every signed
+    /// receipt. Skipping the empty case keeps a policy that has not adopted the
+    /// field serializing byte-for-byte as before, so existing receipts stay tied
+    /// to an unchanged hash. Only a workspace that actually declares a field
+    /// gets a new hash — which is correct, because its governance really did
+    /// change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destination_fields: Vec<String>,
+}
+
+/// Sensible `destination_fields` for a generic caller-controlled HTTP fetch.
+///
+/// Wider than the legacy fixed probe (`destination`/`url`/`endpoint`/`href`) on
+/// purpose: once a tool declares its fields the extraction is fail-closed, so a
+/// name that is merely *unusual* — `uri`, `target`, `webhook` — should be
+/// host-checked against the allowlist rather than turned into a refusal. The
+/// names NOT listed here are the point: they now block instead of slipping
+/// through.
+pub const DEFAULT_EGRESS_DESTINATION_FIELDS: [&str; 7] = [
+    "destination",
+    "url",
+    "uri",
+    "endpoint",
+    "href",
+    "target",
+    "webhook",
+];
+
+impl ToolPolicy {
+    /// `destination_fields` for a tool whose destination is an ordinary
+    /// caller-supplied URL.
+    pub fn default_egress_fields() -> Vec<String> {
+        DEFAULT_EGRESS_DESTINATION_FIELDS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    }
+}
+
+impl Default for ToolPolicy {
+    fn default() -> Self {
+        Self {
+            tool_name: String::new(),
+            allowed_action_types: Vec::new(),
+            // The safe end of the scale: a tool nobody configured should not be
+            // more permissive than one somebody did.
+            max_decision: GovernanceDecision::Block,
+            requires_human_review: false,
+            destination_fields: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +333,105 @@ pub struct GovernanceResult {
     /// alone (D1 / DET-* cluster). `None` when no advisory signal fired.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advisory: Option<serde_json::Value>,
+    /// What each layer block above is allowed to do to a verdict.
+    ///
+    /// A response that lists ten layer blocks with no further qualification
+    /// invites the reader to count ten defences. Four of them cannot move a
+    /// verdict at all, by construction and on purpose:
+    ///
+    ///  * `behavioralFingerprint` — its risk contribution is pinned to 0
+    ///    (`DET-BEHAVIORAL-2`), because it is derived from process-global
+    ///    mutable state that a receipt cannot reproduce.
+    ///  * `sandboxResult` — the composite in `tool_risk` has no sandbox term.
+    ///    It is containment and reporting, not scoring.
+    ///  * `policyVerification` — it lints the WORKSPACE POLICY, not the
+    ///    request. `execute_pipeline` computes it, serializes it and never
+    ///    reads it back, so no issue it reports changes a verdict at any
+    ///    severity.
+    ///  * `telemetrySpan` — an emitted span reference. Nothing reads it back.
+    ///
+    /// Not one of the ten, and the reason this list used to say three:
+    /// `sessionGraph.advisoryScore` is a SUB-FIELD of the session graph block,
+    /// not a block of its own — prior-block history and the wall-clock burst,
+    /// excluded from the signed verdict. It is NOT the same field as
+    /// `anomalyScore`, which is signed, is a term in the composite and
+    /// escalates to review on its own at 50.
+    ///
+    /// Publishing that distinction machine-readably is the same class of fix as
+    /// 2.0.1 ("layers that reported themselves present and were not") and the
+    /// removal of the adaptive block arm: a layer must not appear to be doing
+    /// more than it does. No verdict changes because of this field.
+    #[serde(default = "layer_roles")]
+    pub layer_roles: serde_json::Value,
+}
+
+/// The fixed role table serialized into [`GovernanceResult::layer_roles`].
+///
+/// `veto` — can force a decision on its own. `scoring` — contributes a term to
+/// the composite risk score. `advisory` — reported, never decisive.
+pub fn layer_roles() -> serde_json::Value {
+    serde_json::json!({
+        "sessionGraph": {
+            "role": "veto",
+            "note": "Attack signatures veto; `advisoryScore` does not."
+        },
+        "taintAnalysis": { "role": "veto" },
+        "injectionFirewall": { "role": "veto" },
+        "threatIntel": { "role": "veto" },
+        "schemaValidation": { "role": "veto" },
+        "policyFindings": { "role": "veto" },
+        "policyVerification": {
+            "role": "advisory",
+            "note": "Lints the WORKSPACE POLICY, not the request. \
+                     `execute_pipeline` computes it, serializes it and never \
+                     reads it back, so no issue it reports — at any severity — \
+                     changes a verdict. It answers 'is this policy coherent', \
+                     which is a question about configuration; `policyFindings` \
+                     is the arm that judges the request and vetoes."
+        },
+        "adaptiveRisk": {
+            "role": "scoring",
+            "note": "Contributes to the composite and can escalate to review. \
+                     It has NO score-driven block arm: at its default weights \
+                     the signed ceiling of its four signals is below the block \
+                     threshold, so `block` here comes only from the categorical \
+                     exfiltration override. (Admin feedback via \
+                     POST /v1/risk/feedback re-normalises those weights and can \
+                     lift the ceiling; it still cannot block, because the \
+                     decision has no score arm to reach.) Its `advisory` array \
+                     is excluded from the signed score entirely."
+        },
+        "sandboxResult": {
+            "role": "advisory",
+            "note": "Containment and reporting. The composite risk formula has \
+                     no sandbox term, so this never moves a verdict."
+        },
+        "behavioralFingerprint": {
+            "role": "advisory",
+            "note": "Risk contribution pinned to 0 (DET-BEHAVIORAL-2): derived \
+                     from process-global mutable state a receipt cannot \
+                     reproduce."
+        },
+        "telemetrySpan": {
+            "role": "advisory",
+            "note": "An emitted OTel span reference. Nothing reads it back, and \
+                     no risk term is derived from it."
+        },
+        "pluginResults": {
+            "role": "veto",
+            "note": "Vetoes and scores. `tool_risk` weights the plugin layer at \
+                     0.10 of the composite, but `execute_pipeline` also lets a \
+                     plugin force a decision outright: a `decision_hint` of \
+                     `block`, or a plugin score at or above the workspace block \
+                     threshold — a comparison on the plugin's OWN scale, not \
+                     the composite, so the 0.10 weight does not bound it. A \
+                     plugin error escalates to review."
+        },
+        "advisory": {
+            "role": "advisory",
+            "note": "Excluded from the signed verdict by construction (D1)."
+        }
+    })
 }
 
 // ── Review Request ──
@@ -503,4 +676,63 @@ pub struct DemoResult {
     pub title: String,
     pub decision: GovernanceDecision,
     pub risk: u32,
+}
+
+#[cfg(test)]
+mod layer_roles_tests {
+    use super::*;
+
+    /// `layerRoles` exists to stop a layer from appearing to do more than it
+    /// does — the 2.0.1 defect class. A test that only checked the field was
+    /// present would itself be that defect: it would pass whatever the table
+    /// claimed. So this pins the table against the two properties that make a
+    /// role a lie if violated.
+    ///
+    /// `veto` layers are checked elsewhere against the pipeline; here the point
+    /// is the advisory ones, because "advisory" is the claim a reader most needs
+    /// to trust. Every layer the case study calls advisory —
+    /// `behavioralFingerprint`, `sandboxResult`, and `policyVerification`
+    /// (computed and never read back) — must say so.
+    #[test]
+    fn the_advisory_layers_are_marked_advisory() {
+        let roles = layer_roles();
+        for layer in [
+            "behavioralFingerprint",
+            "sandboxResult",
+            "policyVerification",
+            "advisory",
+        ] {
+            assert_eq!(
+                roles[layer]["role"], "advisory",
+                "{layer} must be marked advisory; claiming otherwise overstates \
+                 coverage, which is exactly the failure layerRoles exists to \
+                 prevent"
+            );
+        }
+    }
+
+    /// The scoring layer must not be sold as a veto. Its block arm was removed
+    /// because its signed ceiling sits below the threshold; calling it `veto`
+    /// would re-introduce the claim the removal retracted.
+    #[test]
+    fn adaptive_risk_is_scoring_not_veto() {
+        let roles = layer_roles();
+        assert_eq!(roles["adaptiveRisk"]["role"], "scoring");
+    }
+
+    /// Every role value must be one of the three defined kinds. A typo like
+    /// "vето" or "advsory" would otherwise render in the API as a silent
+    /// downgrade nobody notices.
+    #[test]
+    fn every_role_is_one_of_the_three_kinds() {
+        let roles = layer_roles();
+        let obj = roles.as_object().expect("layer_roles is an object");
+        for (layer, spec) in obj {
+            let role = spec["role"].as_str().unwrap_or("<missing>");
+            assert!(
+                matches!(role, "veto" | "scoring" | "advisory"),
+                "{layer} has role {role:?}, which is not one of veto/scoring/advisory"
+            );
+        }
+    }
 }

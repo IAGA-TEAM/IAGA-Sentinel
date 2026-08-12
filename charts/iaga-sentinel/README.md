@@ -4,31 +4,51 @@ Deploys the sidecar. Nothing here is required to try the product — a single
 binary and `iaga serve` is enough — this is for running it as a service.
 
 ```sh
+# NOTE: from 2.0.2 `image.tag` has NO default and the render refuses without it.
+# `image.repository` still defaults to ghcr.io/iaga-team/iaga-sentinel, a package
+# that DOES NOT EXIST yet — so with the default repository the pod still lands in
+# ImagePullBackOff. Build and push to your own registry first and add
+# --set image.repository=<your-registry>/iaga-sentinel. See the root README.
 helm install sentinel ./charts/iaga-sentinel \
-  --set image.tag=v2.0.1 \
-  --set env.DATABASE_URL=postgres://…
+  --set image.repository=<your-registry>/iaga-sentinel \
+  --set image.tag=v2.0.2 \
+  --set postgres.enabled=true \
+  --set postgres.url=postgres://…
 ```
 
-## The image tag is pinned in two independent places
+> There is no top-level `env` value in this chart. `--set env.DATABASE_URL=…` is
+> accepted by Helm and then ignored by every template, so the pod comes up on
+> SQLite while the command reads as if it were on Postgres. Use `postgres.url`
+> as above, or `config.databaseUrl` — but not `config.extraEnv.DATABASE_URL`,
+> which would duplicate the `DATABASE_URL` the deployment already emits.
 
-`Chart.yaml: appVersion` and `values.yaml: image.tag` are separate strings and
-**nothing enforces that they agree**. The chart labels every object it creates
-with `appVersion`, so a stale `image.tag` produces a deployment that *claims* one
-version and *runs* another — a shape that has shipped before and is invisible in
-`kubectl get all`. It shipped as recently as 2.0.0: every object was labelled
-`2.0.0` while the pod pulled `v1.8.1`, from a registry namespace CI had stopped
-publishing to at 1.9.0. Fixed in 2.0.1, which is exactly why this section exists.
+## `image.tag` has no default, on purpose
+
+Through 2.0.1 `values.yaml` defaulted `image.tag` to the product version. That
+made `helm install` with shipped values render a perfectly valid reference to an
+image that has never been published, so the first sign of trouble was a pod in
+`ImagePullBackOff` — a failure that looks like a cluster problem and is not.
+
+From 2.0.2 the tag is empty and the template calls `required`, so the render
+fails with a message that names the value and says what to do. **You must pass
+`--set image.tag=<tag>`** (and, until the package exists, `--set
+image.repository=<your-registry>/iaga-sentinel`).
+
+`Chart.yaml: appVersion` still labels every object the chart creates, and
+**nothing enforces that it agrees with the tag you pass**. A deployment can
+therefore claim one version and run another — a shape that shipped as recently
+as 2.0.0, where every object was labelled `2.0.0` while the pod pulled `v1.8.1`
+from a namespace CI had stopped publishing to at 1.9.0.
 
 `deploy/kubernetes/deployment.yaml` (the plain kustomize path) pins the image a
-**third** time, with no relationship to the chart at all.
+second time, with no relationship to the chart at all.
 
-Before releasing, check all three resolve to the same tag:
+Before releasing, check they resolve to the same tag:
 
 ```sh
 grep appVersion charts/iaga-sentinel/Chart.yaml
-grep -A1 'repository:' charts/iaga-sentinel/values.yaml
 grep 'image:' deploy/kubernetes/deployment.yaml
-helm template sentinel ./charts/iaga-sentinel | grep 'image:'
+helm template sentinel ./charts/iaga-sentinel --set image.tag=v2.0.2 | grep 'image:'
 kubectl kustomize deploy/kubernetes | grep 'image:'
 ```
 
@@ -36,6 +56,18 @@ The last two are the ones that matter — they are what actually gets applied.
 
 `Chart.yaml: version` is the CHART's own version and is deliberately *not* the
 product version; bump it when the templates change, not when the product does.
+
+## Upgrading to 2.0.2: migration 0007 is additive
+
+`0007_audit_read_path_indexes` adds two composite indexes on `audit_events` and
+drops nothing. Both statements are `IF NOT EXISTS`, no column or row changes, so
+the upgrade is a normal rolling one and needs none of the ceremony below.
+Verified on both backends: a database created by a 2.0.1 binary, then started
+under 2.0.2, comes up with `_sqlx_migrations` running 1→7, its rows intact and
+the API answering.
+
+The reverse direction is the usual sqlx rule: a 2.0.1 binary meeting a 2.0.2
+schema refuses to start, for the same reason spelled out for `0006` below.
 
 ## Upgrading to 2.0.1: migration 0006 is one-way in practice
 
@@ -93,8 +125,20 @@ runbooks before you need them at 3am.
 
 ### Checking where you actually are
 
+There is no `iaga migrate --status`. `migrate` takes no flags at all: it
+**applies** whatever is pending. To read the state without changing it, query the
+same ledger the binary decides from (step 3 above), with `psql`/`sqlite3` against
+the pod's database:
+
+```sql
+SELECT version, description, success FROM _sqlx_migrations ORDER BY version;
+```
+
+`iaga migrate` is idempotent, so it is a safe way to *reach* the current schema —
+it just will not tell you where you were beforehand:
+
 ```sh
-kubectl exec deploy/sentinel -- iaga migrate --status
+kubectl exec deploy/sentinel -- iaga migrate
 ```
 
 Receipts written before the rollback stay valid — `0006` does not touch the

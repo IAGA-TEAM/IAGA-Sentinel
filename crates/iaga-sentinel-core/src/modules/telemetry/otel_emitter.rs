@@ -143,15 +143,11 @@ impl SpanBuilder {
         }
     }
 
-    pub fn with_trace_id(mut self, id: &str) -> Self {
-        self.trace_id = id.to_string();
-        self
-    }
-
-    pub fn with_parent(mut self, parent_id: &str) -> Self {
-        self.parent_span_id = Some(parent_id.to_string());
-        self
-    }
+    // ponytail: `with_trace_id` and `with_parent` used to sit here, both with
+    // zero call sites - the trace id is always the one minted in `new` and no
+    // caller ever builds a child span. The FIELDS stay: `trace_id` and
+    // `parent_span_id` are serialized into `GovernanceResult.telemetry_span`
+    // and served by GET /v1/telemetry/spans.
 
     pub fn with_kind(mut self, kind: &str) -> Self {
         self.kind = kind.to_string();
@@ -223,25 +219,9 @@ pub fn emit_counter(
     m
 }
 
-pub fn emit_gauge(
-    name: &str,
-    description: &str,
-    value: f64,
-    unit: &str,
-    attrs: HashMap<String, serde_json::Value>,
-) -> OtelMetric {
-    let m = OtelMetric {
-        name: name.to_string(),
-        description: description.to_string(),
-        unit: unit.to_string(),
-        metric_type: "gauge".into(),
-        value,
-        attributes: attrs,
-        timestamp: now_ms(),
-    };
-    store_metric(&m);
-    m
-}
+// ponytail: `emit_gauge` used to sit here, never called by anything. The
+// "gauge" metric_type is still reachable through OtelMetric if a caller ever
+// needs it; the emitter helper was speculative.
 
 pub fn emit_histogram(
     name: &str,
@@ -445,10 +425,8 @@ pub fn get_recent_metrics(limit: usize) -> Vec<OtelMetric> {
     metrics.iter().rev().take(limit).cloned().collect()
 }
 
-pub fn clear_telemetry() {
-    SPANS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    METRICS.lock().unwrap_or_else(|e| e.into_inner()).clear();
-}
+// ponytail: `clear_telemetry()` used to sit here with no callers - not even a
+// test. Both maps are already bounded by `store_span`/`store_metric`.
 
 #[cfg(all(test, feature = "otel-receipts"))]
 mod receipt_span_tests {

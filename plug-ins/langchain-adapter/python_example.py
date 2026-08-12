@@ -1,9 +1,9 @@
 """Govern a LangChain agent's tools with IAGA Sentinel.
 
     pip install langchain-core iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then:
-    python examples/integrations/langchain/python_example.py
+    python plug-ins/langchain-adapter/python_example.py
 
 `SentinelCallbackHandler` implements `on_tool_start`: attach it as a callback and
 every tool call is inspected through IAGA before it runs. allow -> runs and is

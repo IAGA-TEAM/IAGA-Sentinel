@@ -1,5 +1,5 @@
 # Registers the "claude-agent-sdk" agent used by canUseTool.ts / hooks_example.py.
-#   iaga import examples/integrations/claude-agent-sdk/claude-agent-sdk.policy.yaml
+#   iaga import plug-ins/claude-agent-sdk-adapter/claude-agent-sdk.policy.yaml
 # Decisions default to allow (every call still produces a receipt); the injection
 # firewall hard-blocks dangerous payloads (curl | sh) regardless.
 profiles:

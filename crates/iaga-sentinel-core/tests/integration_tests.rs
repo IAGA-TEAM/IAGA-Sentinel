@@ -285,6 +285,7 @@ async fn test_workspace_allow_rule_can_lower_review_to_allow() {
                 allowed_action_types: vec![ActionType::Shell],
                 max_decision: GovernanceDecision::Review,
                 requires_human_review: false,
+                ..Default::default()
             }],
             allowed_domains: vec![],
             threshold_block: 70,
@@ -638,6 +639,7 @@ async fn test_a2a_payload_flows_through_pipeline() {
                 allowed_action_types: vec![ActionType::Http],
                 max_decision: GovernanceDecision::Allow,
                 requires_human_review: false,
+                ..Default::default()
             }],
             allowed_domains: vec![],
             threshold_block: 70,
@@ -726,6 +728,7 @@ async fn test_acp_payload_flows_through_pipeline() {
                 allowed_action_types: vec![ActionType::Http],
                 max_decision: GovernanceDecision::Allow,
                 requires_human_review: false,
+                ..Default::default()
             }],
             allowed_domains: vec![],
             threshold_block: 70,

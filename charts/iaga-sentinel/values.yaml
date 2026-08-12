@@ -4,9 +4,20 @@
 # Number of replicas (SQLite is single-writer, so scale >1 only with Postgres)
 replicaCount: 1
 
+# The intended home for the published image — which DOES NOT EXIST YET. The
+# package is private and the tag push 403s at manifest time (see
+# .github/workflows/docker.yml), so pulling from this repository fails with
+# ImagePullBackOff. Build and push to your own registry and override
+# `image.repository`, or build `iaga-sentinel:local` and load it into the
+# cluster's node image store.
 image:
   repository: ghcr.io/iaga-team/iaga-sentinel
-  tag: v2.0.1
+  # NO DEFAULT, on purpose. Through 2.0.1 this defaulted to the product version
+  # and `helm install` with shipped values rendered a pullable-looking reference
+  # to an image that does not exist, so the first sign of trouble was a pod in
+  # ImagePullBackOff. The template now fails the render with a readable message
+  # instead. Set it to whatever tag you pushed.
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -108,6 +119,20 @@ config:
   reasoningModels: ""
   cleanupIntervalSecs: ""
   cleanupTtlSecs: ""
+
+  # Seconds of agent-scoped taint correlation. Empty or "0" keeps correlation
+  # scoped to the client-declared `metadata.sessionId`, which is the default.
+  #
+  # Turning it on closes the move where an attacker rotates its session id
+  # between reading a credential and posting it out. It raises the bar rather
+  # than removing it: `agentId` is client-declared too, so a caller that rotates
+  # BOTH still presents as unrelated activity. Only the `secret` label crosses a
+  # session boundary, and only into a request that carries a body, so an agent
+  # reading ordinary files and calling allowlisted APIs is unaffected.
+  #
+  # In-memory and per-pod: with replicas > 1 it correlates only within whichever
+  # pod serves the call, and it resets on restart.
+  taintAgentWindowSecs: ""
 
   # Additional plain env vars
   extraEnv: {}

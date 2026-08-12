@@ -92,7 +92,7 @@ metadata:
   labels:
     app.kubernetes.io/name: iaga-sentinel
     app.kubernetes.io/instance: iaga-sentinel
-    app.kubernetes.io/version: "2.0.1"
+    app.kubernetes.io/version: "2.0.2"
 spec:
   replicas: 1
   selector:
@@ -113,7 +113,9 @@ spec:
         fsGroup: 1000
       containers:
         - name: iaga-sentinel
-          image: ghcr.io/iaga-team/iaga-sentinel:v2.0.1
+          # NOT PUBLISHED YET — this pull fails with ImagePullBackOff. Push your
+          # own build here, or repoint this at your registry. See the root README.
+          image: ghcr.io/iaga-team/iaga-sentinel:v2.0.2
           imagePullPolicy: IfNotPresent
           args: ["serve"]
           securityContext:

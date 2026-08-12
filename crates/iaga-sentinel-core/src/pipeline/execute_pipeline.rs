@@ -251,6 +251,13 @@ pub async fn execute_pipeline_at(
             },
             review_request_id: None,
             session_graph: None,
+            // No `correlationScope` here, deliberately. This return fires before
+            // any layer runs, so no multi-step correlation was performed — and
+            // the verdict is Block, which nobody can over-read as evidence that
+            // a chain was examined and found clean. The disclosure exists for
+            // the `allow` path, where the absence of a finding looks like a
+            // finding of absence. Attaching a scope to a null taint block would
+            // report a correlation basis for an analysis that never happened.
             taint_analysis: None,
             adaptive_risk: None,
             sandbox_result: None,
@@ -261,6 +268,7 @@ pub async fn execute_pipeline_at(
             threat_intel: None,
             plugin_results: None,
             advisory: None,
+            layer_roles: crate::core::types::layer_roles(),
         });
     }
 
@@ -306,15 +314,35 @@ pub async fn execute_pipeline_at(
     // operations (false positives; fail-safe toward Review/Block, not a bypass).
     // For precise per-task correlation, pass a stable `metadata.sessionId` per
     // logical session (all SDK adapters expose it).
-    let session_id = input
+    let declared_session_id = input
         .metadata
         .as_ref()
         .and_then(|m| m.get("sessionId"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&input.agent_id);
+        .and_then(|v| v.as_str());
+    let session_id = declared_session_id.unwrap_or(&input.agent_id);
 
-    // We need inherited taints for session graph too, so get them first
-    let inherited_taints = taint_tracker::get_session_taint(session_id);
+    // We need inherited taints for session graph too, so get them first.
+    //
+    // The session key above is whatever the CLIENT said it was, so rotating it
+    // between two beats erases the link between them. When the operator has set
+    // a window, labels this AGENT accumulated in its other sessions are folded
+    // in as well. Off by default: see `taint_tracker::agent_taint_window` for
+    // why the cost of having it on is a certainty rather than a risk.
+    let agent_window = taint_tracker::agent_taint_window();
+    let correlation_scope =
+        taint_tracker::TaintCorrelationScope::describe(declared_session_id.is_some(), agent_window);
+    let mut inherited_taints = taint_tracker::get_session_taint(session_id);
+    if let Some(window) = agent_window {
+        // Not the agent's whole label set: `cross_session_inheritable` keeps
+        // only `secret`, and only when this request actually carries a body.
+        // Folding everything in blocked a non-secret read followed by an
+        // allowlisted GET — measured, 2 false positives in 43 benign controls.
+        let agent_labels = taint_tracker::get_agent_taint(&input.agent_id, window);
+        inherited_taints.extend(taint_tracker::cross_session_inheritable(
+            &agent_labels,
+            &input.action.payload,
+        ));
+    }
 
     let session_result = session_dag::add_tool_call_to_session(
         session_id,
@@ -346,7 +374,19 @@ pub async fn execute_pipeline_at(
         &inherited_taints,
     );
     taint_tracker::update_session_taint(session_id, &taint_result.accumulated_labels);
-    let taint_json = serde_json::to_value(&taint_result).ok();
+    // Recorded unconditionally, so enabling the window later does not begin from
+    // an empty store and report a misleadingly quiet first window.
+    taint_tracker::update_agent_taint(&input.agent_id, &taint_result.accumulated_labels);
+    let taint_json = serde_json::to_value(&taint_result).ok().map(|mut v| {
+        // Attach the correlation basis to the taint block itself: the reader who
+        // is judging a multi-step verdict is looking here, not at a sibling key.
+        if let (Some(obj), Ok(scope)) =
+            (v.as_object_mut(), serde_json::to_value(&correlation_scope))
+        {
+            obj.insert("correlationScope".to_string(), scope);
+        }
+        v
+    });
 
     // v0.4.0, persist taint labels to durable storage (write-behind)
     {
@@ -777,6 +817,32 @@ pub async fn execute_pipeline_at(
     let mut reasons = risk.reasons.clone();
     reasons.push(format!("agent-role:{:?}", profile.role).to_lowercase());
 
+    // Causes that arrive AFTER the risk score is settled: a Dictum policy
+    // firing, and the cost-control budget refusing. Pushed whenever they fire,
+    // not only when they move the verdict — an `allow` policy that fires is
+    // still why this action was judged the way it was, and the audit event has
+    // always recorded it that way.
+    //
+    // They used to be pushed onto `reasons` only — the audit clone — so an
+    // action refused by nothing else came back to the caller as
+    // `"reasons": ["no high-risk rule matched"]` next to `"decision": "block"`,
+    // and the SDKs' `PermissionError`, `demo_run`'s "Why:" and the review queue
+    // all repeated that. Collected here and given to BOTH the audit event and
+    // the caller's `risk.reasons`; the clone above already happened, so neither
+    // gets them twice.
+    //
+    // Not every surface follows: the dashboard Live feed renders `reasons[0]`
+    // only, and these are appended last, so a policy-driven refusal still shows
+    // a baseline reason there. The cost cause never reaches the review queue
+    // either — a budget refusal sets Block, and the queue is only written on
+    // Review. `agent-role:` stays out of this vec on purpose: it is a tag about
+    // the caller, not a reason the action was judged.
+    #[cfg_attr(
+        not(any(feature = "dictum", feature = "cost-control")),
+        allow(unused_mut)
+    )]
+    let mut decision_causes: Vec<String> = Vec::new();
+
     // 1.5 cost-control: cumulative session spend so far + the configured budget,
     // injected into the Dictum context and enforced by the non-Dictum fallback below.
     #[cfg(feature = "cost-control")]
@@ -818,7 +884,7 @@ pub async fn execute_pipeline_at(
             let merged =
                 crate::pipeline::dictum_overlay::merge_decisions(decision, fired.verdict.clone());
             let reason_str = fired.reason.clone().unwrap_or_else(|| "fired".to_string());
-            reasons.push(format!("dictum[{}]: {}", fired.policy_name, reason_str));
+            decision_causes.push(format!("dictum[{}]: {}", fired.policy_name, reason_str));
             decision = merged;
         }
         dictum_trace = Some(crate::pipeline::receipts::DictumTraceData {
@@ -845,13 +911,15 @@ pub async fn execute_pipeline_at(
         if !crate::modules::cost::spend_store::check_and_add(&spend_key, cost_budget_usd, micros) {
             decision = GovernanceDecision::Block;
             if let Some(limit) = cost_budget_usd {
-                reasons.push(format!(
+                decision_causes.push(format!(
                     "cost: session spend ${:.4} exceeds budget ${limit:.4}",
                     cost_session_usd.unwrap_or(0.0)
                 ));
             }
         }
     }
+
+    reasons.extend(decision_causes.iter().cloned());
 
     let audit_event = AuditEvent {
         event_id: Uuid::new_v4().to_string(),
@@ -979,7 +1047,14 @@ pub async fn execute_pipeline_at(
         plugin_results: (!plugin_evaluation.outputs.is_empty())
             .then_some(plugin_evaluation.outputs.clone()),
         advisory,
+        layer_roles: crate::core::types::layer_roles(),
     };
+
+    // The caller gets the same causes the audit event records. Appended after
+    // the struct is built so the receipt path is untouched: the signed body
+    // takes `event.reasons` (`pipeline::receipts`), never `risk.reasons`, so
+    // the frozen wire format does not move.
+    result.risk.reasons.extend(decision_causes);
 
     // 1.5 cost-control: resolve any caller-reported usage into the canonical
     // cost ledger (priced locally; a caller-supplied cost wins). No-op (None)
@@ -1053,6 +1128,16 @@ pub async fn execute_pipeline_at(
     if result.decision == GovernanceDecision::Review {
         let now = decision_ts.clone();
         let mut review_reasons = result.policy_findings.clone();
+        // `risk.reasons` now carries the overlay attribution (see
+        // `decision_causes` above), so the human deciding this request sees the
+        // rule that opened it. It used to reach them as "no high-risk rule
+        // matched" with nothing naming the rule, because the attribution was
+        // pushed only onto the audit clone.
+        //
+        // Sourced from here rather than from `audit_event.reasons`, which is a
+        // superset: that one also carries `agent-role:<role>`, a tag about the
+        // caller rather than a reason to refuse, and the queue is the one place
+        // where every extra line costs a human's attention.
         review_reasons.extend(result.risk.reasons.clone());
 
         let review = ReviewRequest {

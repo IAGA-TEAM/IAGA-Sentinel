@@ -2,10 +2,10 @@
  * Govern an OpenAI client's calls with IAGA Sentinel (TypeScript).
  *
  *   npm i openai @iaga-sentinel/sdk
- *   IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+ *   IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
  *   # register the agent (see README.md), then run with tsx:
  *   # set OPENAI_API_KEY in your shell, then:
- *   npx tsx examples/integrations/openai-ts/ts_example.ts
+ *   npx tsx plug-ins/openai-ts-adapter/ts_example.ts
  *
  * sentinelWrapOpenAI returns a drop-in proxy: every chat.completions.create /
  * responses.create is inspected through IAGA before the request is sent.

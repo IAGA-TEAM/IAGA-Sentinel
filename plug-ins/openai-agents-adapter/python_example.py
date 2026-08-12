@@ -1,7 +1,7 @@
 """Govern an OpenAI Agents SDK agent with IAGA Sentinel.
 
     pip install openai-agents iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then run your agent.
 
 Two hooks (use either or both):

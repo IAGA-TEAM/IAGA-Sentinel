@@ -1,5 +1,5 @@
 # Registers the "autogen-demo" agent.
-#   iaga import examples/integrations/autogen/autogen.policy.yaml
+#   iaga import plug-ins/autogen-adapter/autogen.policy.yaml
 profiles:
   - agentId: autogen-demo
     workspaceId: ws-autogen

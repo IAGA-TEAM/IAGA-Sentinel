@@ -1,5 +1,5 @@
 # Registers the "mcp-demo" agent used by python_example.py / ts_example.ts.
-#   iaga import examples/integrations/mcp/mcp.policy.yaml
+#   iaga import plug-ins/mcp-adapter/mcp.policy.yaml
 # Decisions default to allow (every call still produces a receipt); the injection
 # firewall hard-blocks dangerous payloads (curl | sh) regardless.
 # NOTE: this is the policy-profile "framework" label only; the adapter sends

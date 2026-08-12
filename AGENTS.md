@@ -48,10 +48,12 @@ language) only if they prefer it. The messages below are templates: say them in 
      memory directory (not just `MEMORY.md`, not just `feedback_*`), treat **each** normative sentence
      (*never / always / only / must / don't / ask before*) as its own candidate rule, cite the file and
      line for each, and merge only true duplicates. Expect **one policy per distinct obligation on top of
-     the 5 baseline rules in §11b** — **if you end up with ≤4 policies you have under-read your memory:
-     go back.** Do this pre-pass yourself with your own file tools; there is no shortcut command for
-     it, and inventing rules instead of reading for them is the failure mode this step exists to
-     prevent.
+     the 3 baseline rules in §11b** (`scripts/agent_bootstrap.sh` and `.ps1` write a fourth,
+     `human_reviews_sensitive_reads`, so a bootstrapped overlay starts at 4) — **and check coverage, not
+     a count: if any encodable obligation you extracted has no policy citing the file and line it came
+     from, you have under-read your memory: go back.** Do this pre-pass yourself with your own file
+     tools; there is no shortcut command for it, and inventing rules instead of reading for them is the
+     failure mode this step exists to prevent.
 
    For each rule you find, decide whether it is **action-governance** — does it constrain a concrete
    action (`shell`, `file_write`, `http`, `db_query`, …)? Only those can be encoded as Dictum. Rules
@@ -80,7 +82,11 @@ language) only if they prefer it. The messages below are templates: say them in 
 3. **Start the dashboard server** (the human-visible UI on `localhost`) with your approved policy as an
    overlay, on a fixed database a second process can share:
    ```bash
-   IAGA_SENTINEL_OPEN_MODE=true DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" \
+   # Open mode makes every unauthenticated caller an implicit ADMIN and the server's own
+   # default bind host is 0.0.0.0 — without IAGA_SENTINEL_HOST this publishes an admin API
+   # to the whole LAN. There is no --host flag; the bind interface is env-only.
+   IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true \
+     DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" \
      iaga serve --seed-demo --port 4010 --policy agent_rules.dictum
    ```
    Wait until `GET http://127.0.0.1:4010/health` returns `{"ok":true}`, then confirm the policy loaded
@@ -221,13 +227,23 @@ and `rm -rf` is blocked. Everything lands in the dashboard at `http://localhost:
 ./scripts/demo_run.sh          # Terminal B  (needs curl + jq)
 ```
 
-**Docker (zero clone, zero Rust toolchain):**
+**Docker (no Rust toolchain on the host — the builder stage carries it):**
 
 ```bash
-docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
-  ghcr.io/iaga-team/iaga-sentinel:latest serve --seed-demo
+docker build -t iaga-sentinel:local .
+docker run -p 127.0.0.1:4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
+  iaga-sentinel:local serve --seed-demo
 # then open http://localhost:4010/
+# Open mode makes every unauthenticated caller an implicit ADMIN while no API key exists, so
+# publish on loopback only — otherwise /v1/audit, the signed decision log, is readable by the
+# whole LAN. Pin the publish, not IAGA_SENTINEL_HOST: binding the container to its own loopback
+# would make the published port unreachable. Same rule as the standing-procedure bring-up above.
 ```
+
+> **No published image exists.** `ghcr.io/iaga-team/iaga-sentinel` does not resolve — the package is
+> private and the tag push 403s at manifest time (see `.github/workflows/docker.yml`). Build it, or
+> use `cargo install --git` (section 5). Do not send anyone to
+> `ghcr.io/edoardobambini/...:v1.8.1`: it is six releases behind.
 
 That is the whole loop. The rest of this file explains every moving part so an agent can do it
 without the demo scripts, wire in its own framework, add auth, or debug.
@@ -264,9 +280,9 @@ not describe it as a "gateway."
 
 ```
 iaga-sentinel/                      # repo root (project name: IAGA Sentinel)
-├── Cargo.toml                    # workspace root (9 crates), version 2.0.1, MSRV 1.88, BUSL-1.1
+├── Cargo.toml                    # workspace root (9 crates), version 2.0.2, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
-├── Dockerfile                    # 2-stage build -> ghcr.io/iaga-team/iaga-sentinel
+├── Dockerfile                    # 2-stage build; no image published yet (see 16)
 ├── docker-compose.yml            # server + 2 named volumes (data + signer keys)
 ├── iaga-sentinel.config.json     # sample policy config (JSON form of the YAML)
 ├── crates/                       # the Rust workspace (see §3)
@@ -286,6 +302,18 @@ Binaries produced by the workspace:
 - **`iaga-verify`** — standalone offline receipt-chain verifier. Crate: `crates/iaga-sentinel-verify`.
 
 On Windows they are `target\release\iaga.exe` and `target\release\iaga-verify.exe`.
+
+**The signed receipt wire format is FROZEN.** `ReceiptBody`'s fields and their
+serialization are a compatibility surface — `iaga-sentinel-receipts/tests/signing_bytes_golden.rs`
+pins the exact signed bytes, and the multilingual verifiers (`iaga-verify`, the
+pure-Python `sdks/python/iaga_verify.py`) re-serialize those bytes independently.
+Do not add, rename, reorder, or change the serde attribute of any signed field;
+a new field means a new receipt version, not an edit. Corollary: `CHAIN OK`
+proves PREFIX integrity, not completeness — a tail-truncated chain is a shorter
+valid chain and verifies with exit 0. To detect truncation offline, pass
+`iaga-verify --expect-count <n>` with the length you recorded when the run
+happened; a chain of the wrong length then exits 1. The count is an external
+anchor, deliberately NOT part of the signed bytes.
 
 ---
 
@@ -337,7 +365,7 @@ Notes:
 Install from git instead of building locally:
 
 ```bash
-cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.0.1 --locked \
+cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.0.2 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 ```
 
@@ -349,12 +377,18 @@ The server subcommand is `serve` (it is also the **default** when no subcommand 
 
 ```bash
 # simplest local bring-up: no auth required, seeded demo profiles/workspaces
-IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo
+# Open mode makes every unauthenticated caller an implicit ADMIN while no API key exists, and the
+# default bind host below is 0.0.0.0 — without IAGA_SENTINEL_HOST this publishes an admin API to
+# the whole LAN. There is no --host flag; the bind interface is env-only.
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true iaga serve --seed-demo
 ```
 
 PowerShell equivalent:
 
 ```powershell
+# Bind to loopback explicitly: open mode makes every unauthenticated caller
+# an implicit ADMIN, and the server's own default host is 0.0.0.0.
+$env:IAGA_SENTINEL_HOST      = '127.0.0.1'
 $env:IAGA_SENTINEL_OPEN_MODE = 'true'
 .\target\release\iaga.exe serve --seed-demo
 ```
@@ -489,7 +523,7 @@ Auth header is `Authorization: Bearer <api_key>`. Async: `AsyncSentinelClient`.
   `chat.completions.create` / `responses.create` and runs a governance preflight.
 - **Copy-paste adapters for 15+ frameworks:** `plug-ins/*-adapter/` (openai, langchain, langgraph,
   crewai, autogen, llamaindex, mcp, claude-code, claude-agent-sdk, vercel-ai, pydantic-ai, ...).
-- **Released plugins:** `plug-ins/voltagent-plugin/`, `plug-ins/letta-plugin/`, `plug-ins/codex-plugin/`.
+- **Released plugins:** `plug-ins/voltagent-plugin/`, `plug-ins/letta-plugin/`.
 - **TypeScript SDK:** `sdks/typescript/`.
 - **MCP (the recommended self-connect path):** speak MCP to `iaga mcp-server` — see **§7d**.
 
@@ -517,7 +551,7 @@ printf '%s\n' \
  | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server --policy agent_rules.dictum
 ```
 
-Expected: `initialize` → `serverInfo iaga-sentinel 2.0.1`; `tools/list` → `[iaga.inspect,
+Expected: `initialize` → `serverInfo iaga-sentinel 2.0.2`; `tools/list` → `[iaga.inspect,
 iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
 81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
 it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
@@ -525,7 +559,16 @@ in the dashboard at `http://localhost:4010/`.
 
 > **Payload shape over MCP (`protocol: mcp`).** The payload must carry the target tool's fields:
 > `filesystem.read` needs `path`; `filesystem.write` needs `path` + `content`; `terminal.exec` needs
-> `command`; `http.fetch` needs `method` + `destination`. An `intent` string is **recommended** (it
+> `command`; `http.fetch` needs `method` plus a destination under any one of `destination`, `url`,
+> `uri`, `endpoint`, `href`, `target` or `webhook` (the names the egress layer recognises — requiring
+> `destination` alone made schema validation refuse calls the policy layer checks correctly).
+> **The seven names are recognised by the SCHEMA and by the workspace egress layer, not by the
+> shipped Dictum example**: `url_host(action.payload.destination)` reads one key, errors on the
+> other six, and a `when` that errors on a `block` rule is a fail-closed fire (§11d), so a benign
+> call under `uri`/`target`/`webhook` is refused with `dictum-eval-error`. Cover the aliases on the
+> **workspace policy** — `destinationFields` on the tool, which is fail-closed by design — not in a
+> Dictum rule. An
+> `intent` string is **recommended** (it
 > enriches the receipt) but is **advisory** — it no longer forces a block when missing. An unknown tool
 > name, or a missing *structural* field, still fails schema validation and blocks.
 
@@ -599,7 +642,9 @@ export and **verify the signed chain offline**.
 ```powershell
 .\scripts\demo.ps1 -Build        # Windows;  ./scripts/demo.sh --build  on Linux/macOS
 ```
-Sets `IAGA_SENTINEL_OPEN_MODE=true`, `CARGO_INCREMENTAL=0`, `PORT=4010`; wipes `iaga_sentinel.db`
+Sets `IAGA_SENTINEL_HOST=127.0.0.1` (open mode makes every unauthenticated caller an implicit
+ADMIN, and the default bind is `0.0.0.0`), `IAGA_SENTINEL_OPEN_MODE=true`, `CARGO_INCREMENTAL=0`,
+`PORT=4010`; wipes `iaga_sentinel.db`
 (+ `-wal`/`-shm`) for an identical seed each run; runs `iaga serve --seed-demo`; prints the
 dashboard URL once `/health` is green.
 
@@ -688,6 +733,24 @@ when a budget is configured, e.g. `IAGA_SENTINEL_SESSION_BUDGET_USD`).
 > `workspace.allowlist` holds **domains** (it is `workspace_policy.allowed_domains`), so
 > `url_host(action.payload.destination) not in workspace.allowlist` is the correct idiom — see §11d
 > for the shipped example that gets this wrong.
+>
+> **It reads `destination` and only `destination`.** Dictum has no coalescing builtin, so the same
+> rule cannot also cover `url`/`uri`/`endpoint`/`href`/`target`/`webhook`: on those payloads
+> `url_host()` errors, and an erroring `when` on a `block`/`review` rule **fires fail-closed** with
+> the reason `dictum-eval-error` — a refusal written into the signed `auditEvent.reasons` under a
+> rule name the request never violated.
+>
+> **Put `secret_ref(action.payload)` before `url_host(...)`.** `and` short-circuits, so an ordinary
+> call with no credential in it stops at the first conjunct and never reaches `url_host()`. A call
+> that *does* carry a credential still evaluates it, so an alias there still fails closed: the
+> protection is unchanged and the false refusal is gone. Measured on the shipped example, with the
+> demo workspace declaring all seven names — before the reorder, a credential-free `GET` under
+> `uri` or `webhook` to an **allowlisted** host was refused with `dictum-eval-error`; after it,
+> `allow`, while `uri` to a non-allowlisted host is still blocked and now says which host.
+>
+> Ordering makes the rule stop lying; it does not make it *cover* the other six names. For that,
+> declare them in the **workspace policy** (`destinationFields` on the tool), which applies the
+> domain allowlist to all of them, fail-closed. The two are complementary — you want both.
 
 **These paths do NOT exist** (referencing them blocks everything — §11c): `action.url`,
 `action.risk_score`, `agent.role`, `tenant`, `protocol`, `metadata`, `requested_secrets`.
@@ -706,10 +769,15 @@ policy "never_destroy_production_data" {
 }
 
 // "Never send credentials to a host we haven't approved."
+// ORDER MATTERS: secret_ref() first. `and` short-circuits, and url_host() ERRORS
+// on a payload whose target is named url/uri/endpoint/href/target/webhook rather
+// than `destination` — an erroring `when` on a block rule fires fail-closed. Test
+// for the credential first and an ordinary call never reaches url_host(); a call
+// that does carry one still does, so the protection is unchanged. See §11d.
 policy "no_secret_egress_off_allowlist" {
   when action.kind == "http"
-   and url_host(action.payload.destination) not in workspace.allowlist
    and secret_ref(action.payload)
+   and url_host(action.payload.destination) not in workspace.allowlist
   then block, reason="credentials must not leave approved hosts",
        evidence=action.payload.destination
 }
@@ -731,11 +799,18 @@ curl -s http://127.0.0.1:4010/v1/policy/overlay
 Then smoke-test that you did not over-block (see §11c): a benign `file_read` must still come back
 `allow`, while `rm -rf …` comes back `block`. Both verified with the policy above.
 
-> **Where to see that a policy actually fired.** The attribution lands in
-> **`auditEvent.reasons`**, as `dictum[<policy_name>]: <your reason>` — **not** in `risk.reasons`,
-> which keeps only the baseline reasons. So a policy-driven block looks like
-> `decision=block`, `risk.score=2`, `risk.reasons=["no high-risk rule matched"]`, and the real
-> explanation sits in `auditEvent.reasons`. Always look there when debugging a policy.
+> **Where to see that a policy actually fired.** The attribution appears as
+> `dictum[<policy_name>]: <your reason>` in **`risk.reasons`**, in **`auditEvent.reasons`** (and so
+> in the signed receipt), and in the review queue. It is appended after the baseline reasons, so on
+> a policy-driven block you get `decision=block`, `risk.score=2` and
+> `risk.reasons=["no high-risk rule matched", "dictum[...]: ..."]` — the low score is correct, the
+> overlay is what refused.
+>
+> One surface still shows less: the dashboard **Live feed** renders only `reasons[0]`, so a refusal
+> with several baseline reasons hides the attribution there. The demo drivers differ from each other:
+> `scripts/demo_run.ps1` sorts the `dictum[...]`/`cost:` lines to the front before truncating to
+> four, so the attribution always shows; `scripts/demo_run.sh` prints no reasons at all, only the
+> verdict and score. `auditEvent.reasons` is the complete record.
 
 **Verified functionally** (9-case suite, each on its own port + database):
 
@@ -781,10 +856,10 @@ policy "stop_when_over_budget" {
 
 With **no budget configured** (so `budget` is never inserted into the context), a harmless
 `file_read` comes back `decision=block` with `risk.score=2` and
-`risk.reasons=["no high-risk rule matched"]`. The baseline said allow and the overlay forced the
-block — and because `risk.reasons` only ever carries baseline reasons, the block looks unexplained
-unless you know to read `auditEvent.reasons`, where it appears as
-`dictum[stop_when_over_budget]: dictum-eval-error`. Controlled comparison:
+`risk.reasons=["no high-risk rule matched", "dictum[stop_when_over_budget]: dictum-eval-error"]`.
+The baseline said allow and the overlay forced the block; the low score is correct and the second
+reason is the explanation. (Before this change `risk.reasons` carried only the baseline, so the
+block looked unexplained unless you knew to read `auditEvent.reasons`.) Controlled comparison:
 
 | Policy loaded | Budget configured | `file_read` verdict |
 |---|---|---|
@@ -920,7 +995,8 @@ Routes: `crates/iaga-sentinel-core/src/server/create_server.rs`. Full spec: `doc
   MCP-governed actions then appear here live (verified: an `iaga.inspect` BLOCK over MCP shows up in
   the dashboard's counters immediately).
 - URL to hand the user: **http://localhost:4010/**. Tabs: **Live feed** (SSE `/v1/events/stream`),
-  **Evidence** (signed receipts), **Audit**.
+  **Receipts** (signed receipts), **Audit** — alongside Overview, Decisions, Agents,
+  Telemetry, Reviews & sandbox, Cost, Security, Identity, Plugins and Settings.
 
 ---
 
@@ -966,7 +1042,10 @@ plugin-manifest-signing --lib`, `--features cost-control`, `--features postgres`
   and `iaga-sentinel-keys` → `/home/iaga/.iaga-sentinel/keys`. Env includes
   `IAGA_SENTINEL_OPEN_MODE`, `IAGA_SENTINEL_BOOTSTRAP_API_KEY`, `IAGA_SENTINEL_NHI_MASTER_SEED`.
 - **Kubernetes:** `deploy/kubernetes/` (raw) or the Helm chart `charts/iaga-sentinel/`.
-- Published image: `ghcr.io/iaga-team/iaga-sentinel:latest`.
+- **Published image: none.** `ghcr.io/iaga-team/iaga-sentinel` is the intended home and does
+  not resolve today; the deploy manifests and the Helm chart still name it, so an operator
+  must push their own build there (or override `image.repository`) before `helm install` can
+  pull anything. `docker build -t iaga-sentinel:local .` is the working local path.
 
 ---
 
@@ -1001,8 +1080,8 @@ knowing before you tune them:
 | `IAGA_SENTINEL_SESSION_TTL_MS` | `1800000` (30 min) idle before a session is pruned |
 | `IAGA_SENTINEL_BLOCK_COOLDOWN_MS` | `60000`; how long a blocked session stays blocked before decaying to a cooldown state |
 | `IAGA_SENTINEL_MAX_BLOCK_COUNT` | `3` blocks before a session latches permanently. Counts **FSA denials only**, not every refusal, so the ceiling is not reachable from the layers that do most of the refusing — see the release notes |
-| `IAGA_SENTINEL_ENV_DENYLIST` | comma-separated extra environment names stripped from a child launched by `iaga run`, on top of the built-in list |
-| `IAGA_SENTINEL_ENV_DENYLIST_STRICT` | `false`; `1`/`true` makes a denylisted variable **fail the launch closed** instead of stripping it. A refused launch exits 2 (§10) |
+| `IAGA_SENTINEL_ENV_DENYLIST` | path to a TOML file (`deny = ["MY_SECRET", ...]`) whose names are stripped, on top of the built-in list, from a child launched by `iaga run`. Unset by default; an unreadable path only warns unless STRICT is on |
+| `IAGA_SENTINEL_ENV_DENYLIST_STRICT` | `false`; `1`/`true` makes an **unreadable or malformed denylist TOML fail the launch closed** instead of degrading to the built-in list. It does not change what happens to a denylisted variable — stripping is unconditional in both modes. A refused launch exits 2 (§10) |
 
 **Periodic cleanup** (`serve` only): `IAGA_SENTINEL_CLEANUP_INTERVAL_SECS` (`300`) and
 `IAGA_SENTINEL_CLEANUP_TTL_SECS` (`3600`) drive the task that prunes sessions, taint,
@@ -1050,7 +1129,7 @@ signed receipt. Three outcomes: **allow** (it proceeds), **review** (you get a p
 
 | I want to… | Do this |
 |---|---|
-| see the dashboard | open **http://localhost:4010/** — Live feed, Evidence, Audit |
+| see the dashboard | open **http://localhost:4010/** — Live feed, Receipts, Audit |
 | check it is actually running | `curl -s 127.0.0.1:4010/health` |
 | see which rules are loaded | `curl -s 127.0.0.1:4010/v1/policy/overlay` |
 | read the decisions | `iaga audit --limit 20 --format table` |
@@ -1087,4 +1166,4 @@ records what was decided either way.
 
 ---
 
-*IAGA Sentinel v2.0.1 · BUSL-1.1 · https://github.com/IAGA-TEAM/IAGA-Sentinel*
+*IAGA Sentinel v2.0.2 · BUSL-1.1 · https://github.com/IAGA-TEAM/IAGA-Sentinel*

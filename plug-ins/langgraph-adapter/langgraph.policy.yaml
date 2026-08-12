@@ -1,5 +1,5 @@
 # Registers the "langgraph-demo" agent used by python_example.py / js_example.mjs.
-#   iaga import examples/integrations/langgraph/langgraph.policy.yaml
+#   iaga import plug-ins/langgraph-adapter/langgraph.policy.yaml
 # Decisions default to allow (every call still produces a receipt); the injection
 # firewall hard-blocks dangerous payloads (curl | sh) regardless.
 profiles:

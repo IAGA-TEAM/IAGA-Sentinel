@@ -23,7 +23,8 @@ receipts honestly record `is_authoritative = false`.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 The sidecar listens on `http://localhost:4010`.
@@ -35,7 +36,7 @@ The sidecar listens on `http://localhost:4010`.
 govern nothing until you register it. Import the bundled policy once:
 
 ```bash
-./target/release/iaga import examples/integrations/claude-code/claude-code.policy.yaml
+./target/release/iaga import plug-ins/claude-code-adapter/claude-code.policy.yaml
 ```
 
 It maps Claude Code's tool names (`Bash`, `Read`, `Write`, …) to action types
@@ -56,7 +57,7 @@ regardless. Tighten any tool to `maxDecision: review` to require human approval.
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PROJECT_DIR}/examples/integrations/claude-code/iaga_claude_hook.py\""
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/plug-ins/claude-code-adapter/iaga_claude_hook.py\""
           }
         ]
       }
@@ -76,7 +77,7 @@ regardless. Tighten any tool to `maxDecision: review` to require human approval.
         "hooks": [
           {
             "type": "command",
-            "command": "python \"C:\\path\\to\\examples\\integrations\\claude-code\\iaga_claude_hook.py\""
+            "command": "python \"C:\\path\\to\\plug-ins\\claude-code-adapter\\iaga_claude_hook.py\""
           }
         ]
       }
@@ -112,7 +113,10 @@ receipt — and the hook never silently widens your own permission choices.
 
 ## 6. Verify a receipt offline
 
-`auditEvent.eventId` from the verdict is the receipt's `run_id`.
+The receipt's `run_id` is `<IAGA_AGENT_ID>:<session_id>` — `claude-code:<session_id>` with the
+default agent id — because the hook forwards Claude Code's `session_id` as `metadata.sessionId`,
+so one chain covers the whole session. (`auditEvent.eventId` is the `run_id` only for a
+session-less caller, which this hook is not.)
 
 ```bash
 ./target/release/iaga replay --list
@@ -126,8 +130,9 @@ The exported receipt includes `is_authoritative: false`.
 
 ```bash
 pip install pytest
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo &
-pytest examples/integrations/claude-code/test_hook.py -v
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo &
+pytest plug-ins/claude-code-adapter/test_hook.py -v
 ```
 
 Allow/block tests skip automatically if the sidecar isn't reachable; the

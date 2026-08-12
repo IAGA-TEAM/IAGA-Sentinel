@@ -265,6 +265,27 @@ fn check_satisfiability(policy: &WorkspacePolicy) -> Vec<PolicyIssue> {
         });
     }
 
+    // Tool names whose HTTP destination is baked into a provider client rather
+    // than supplied in the payload. Suggesting `destinationFields` for these
+    // would turn a fail-closed extraction on a payload that legitimately has no
+    // URL — the shape that broke the OpenAI adapter in 1.9.2 and had to be
+    // reverted.
+    fn looks_like_provider_sdk(tool_name: &str) -> bool {
+        const PROVIDER_PREFIXES: [&str; 7] = [
+            "openai.",
+            "anthropic.",
+            "azure.",
+            "bedrock.",
+            "vertex.",
+            "cohere.",
+            "mistral.",
+        ];
+        let lower = tool_name.to_ascii_lowercase();
+        PROVIDER_PREFIXES.iter().any(|p| lower.starts_with(p))
+            || lower.contains("chat.completions")
+            || lower.contains("model.inference")
+    }
+
     // HTTP tools without allowed domains
     let has_http_tools = policy
         .tools
@@ -284,6 +305,50 @@ fn check_satisfiability(policy: &WorkspacePolicy) -> Vec<PolicyIssue> {
                 .map(|t| t.tool_name.clone())
                 .collect(),
             suggestion: "Add allowed domains or remove HTTP from tool action types".into(),
+        });
+    }
+
+    // HTTP tools that never say where their destination lives.
+    //
+    // Without `destination_fields` the domain allowlist is applied by a fixed
+    // four-name probe (`destination`/`url`/`endpoint`/`href`). A caller naming
+    // its target anything else — `target`, `uri`, `callback`, `webhook` — is
+    // invisible to it, and finding nothing SKIPS the allowlist rather than
+    // failing closed. That is how a POST to an unlisted host scored 2 and was
+    // allowed in the live suite. A declaring tool is host-checked on any of its
+    // declared names and refused when the payload exposes none.
+    //
+    // Not raised for tools whose destination is not caller-supplied: an LLM SDK
+    // call carries its endpoint in the client, and declaring there would refuse
+    // every legitimate call. The heuristic is deliberately crude — it only asks
+    // whether the tool name looks like a provider SDK path — because the cost of
+    // a false "declare this" suggestion is a broken integration.
+    let undeclared_egress: Vec<&ToolPolicy> = policy
+        .tools
+        .iter()
+        .filter(|t| {
+            t.allowed_action_types.contains(&ActionType::Http)
+                && t.destination_fields.is_empty()
+                && t.tool_name != "*"
+                && !looks_like_provider_sdk(&t.tool_name)
+        })
+        .collect();
+    if !undeclared_egress.is_empty() {
+        issues.push(PolicyIssue {
+            severity: "medium".into(),
+            category: "weak-enforcement".into(),
+            description:
+                "HTTP tools do not declare destinationFields, so the domain allowlist is applied \
+                 only to the legacy field names destination/url/endpoint/href and is skipped \
+                 entirely for a payload that names its target anything else"
+                    .into(),
+            affected_tools: undeclared_egress
+                .iter()
+                .map(|t| t.tool_name.clone())
+                .collect(),
+            suggestion: "Add destinationFields (e.g. [destination, url, uri, endpoint, href, \
+                         target]) to each tool whose destination is caller-supplied"
+                .into(),
         });
     }
 

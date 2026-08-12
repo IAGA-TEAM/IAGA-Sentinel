@@ -1,10 +1,10 @@
 //! `iaga-verify`: verify an exported IAGA Sentinel receipt chain offline.
 //!
 //! Usage:
-//!   iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]
+//!   iaga-verify <chain.json> [--key <hex-ed25519-pubkey>] [--expect-count <n>]
 //!
 //! Where `<chain.json>` is produced by `iaga replay <run_id> --export`.
-//! Exit codes: 0 chain valid, 1 chain broken or empty, 2 usage error,
+//! Exit codes: 0 chain valid, 1 chain broken/empty/wrong-length, 2 usage error,
 //! 3 IO or parse error.
 
 use std::process::ExitCode;
@@ -12,12 +12,14 @@ use std::process::ExitCode;
 use iaga_sentinel_receipts::{ChainExport, ChainStatus};
 use iaga_sentinel_verify::{verify_export, KeySource};
 
-const USAGE: &str = "usage: iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]";
+const USAGE: &str =
+    "usage: iaga-verify <chain.json> [--key <hex-ed25519-pubkey>] [--expect-count <n>]";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut path: Option<String> = None;
     let mut key: Option<String> = None;
+    let mut expect_count: Option<u64> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -25,6 +27,29 @@ fn main() -> ExitCode {
                 Some(k) => key = Some(k),
                 None => {
                     eprintln!("iaga-verify: --key needs a hex public key");
+                    return ExitCode::from(2);
+                }
+            },
+            // The one honest defence against tail truncation offline. "CHAIN OK"
+            // proves PREFIX integrity: dropping trailing receipts leaves a
+            // shorter, still-valid chain that verifies with exit 0, and a reader
+            // notices only from the printed count. A verifier cannot know the
+            // real length from the export alone — the length is not signed — so
+            // it has to be told. `--expect-count` is that external anchor: the
+            // caller supplies the count it recorded when the run happened (or
+            // read from an archival log), and a chain that comes back shorter
+            // fails instead of quietly passing. No wire-format change; the count
+            // stays outside the frozen receipt bytes.
+            "--expect-count" => match args.next() {
+                Some(n) => match n.parse::<u64>() {
+                    Ok(v) => expect_count = Some(v),
+                    Err(_) => {
+                        eprintln!("iaga-verify: --expect-count needs a non-negative integer");
+                        return ExitCode::from(2);
+                    }
+                },
+                None => {
+                    eprintln!("iaga-verify: --expect-count needs a value");
                     return ExitCode::from(2);
                 }
             },
@@ -37,6 +62,13 @@ fn main() -> ExitCode {
                     "Pass --key with the expected public key to authenticate authorship; without"
                 );
                 println!("it the verifier trusts the key embedded in the export (self-asserted).");
+                println!(
+                    "Pass --expect-count <n> to fail a tail-truncated chain: a valid chain of the"
+                );
+                println!(
+                    "wrong length exits 1. The count is an external anchor, not part of the signed"
+                );
+                println!("bytes, so it must come from your own record of the run.");
                 return ExitCode::SUCCESS;
             }
             other if path.is_none() => path = Some(other.to_string()),
@@ -98,8 +130,22 @@ Pass --key with the expected public key to authenticate authorship."
             // 0..receipt_count-1. "CHAIN OK" proves PREFIX integrity, not
             // completeness — dropping trailing receipts still verifies as a
             // shorter valid chain. Detecting tail truncation offline needs an
-            // external anchor (sealed head / archival timestamp), which is
-            // Enterprise (see SECURITY.md).
+            // external anchor, which `--expect-count` supplies.
+            if let Some(expected) = expect_count {
+                if receipt_count != expected {
+                    eprintln!(
+                        "CHAIN LENGTH MISMATCH  run_id={}  receipts={}  expected={}  \
+signer={}  key={}",
+                        export.run_id, receipt_count, expected, export.signer_key_id, key_label
+                    );
+                    eprintln!(
+                        "the chain is internally valid but not the length you anchored: \
+{} of {} receipts. A shorter valid chain is what tail truncation looks like.",
+                        receipt_count, expected
+                    );
+                    return ExitCode::from(1);
+                }
+            }
             let last_seq = receipt_count.saturating_sub(1);
             println!(
                 "CHAIN OK  run_id={}  receipts={}  seq=0..{}  signer={}  key={}",

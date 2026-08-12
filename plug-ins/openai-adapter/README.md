@@ -5,7 +5,8 @@ every `chat.completions.create` / `responses.create` is inspected through
 `POST /v1/inspect` before the request is sent.
 
 - **allow** → the request is sent and a signed receipt is produced
-- **review / block** → raises `SentinelBlockedError` / `PermissionError`
+- **review / block** → both raise `PermissionError` (the Python SDK defines no
+  dedicated exception type; the message carries the score and the reasons)
 - sidecar unreachable → fail-open by default (`fail_closed=True` to deny)
 
 A dangerous prompt (e.g. one carrying `curl … | sh`) is blocked by the injection
@@ -15,13 +16,14 @@ firewall **before** any OpenAI spend.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/openai/openai.policy.yaml
+./target/release/iaga import plug-ins/openai-adapter/openai.policy.yaml
 ```
 
 ## 3. Run
@@ -29,7 +31,7 @@ IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```bash
 pip install openai iaga-sentinel
 # Set OPENAI_API_KEY in your shell, then:
-python examples/integrations/openai/python_example.py
+python plug-ins/openai-adapter/python_example.py
 ```
 
 ```python

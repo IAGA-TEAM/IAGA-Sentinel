@@ -12,7 +12,12 @@ default.
 ## Quickstart
 
 ```bash
-docker run -p 4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true ghcr.io/iaga-team/iaga-sentinel:v2.0.1 serve
+# from this directory (plug-ins/voltagent-plugin); no published image yet, see the root README
+docker build -t iaga-sentinel:local ../..
+# open mode makes every unauthenticated caller an implicit ADMIN, so publish on loopback only.
+# Pin the publish, not IAGA_SENTINEL_HOST: binding the container to its own loopback would make
+# the published port unreachable.
+docker run -p 127.0.0.1:4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true iaga-sentinel:local serve
 npm i @iaga-sentinel/voltagent @voltagent/core
 ```
 

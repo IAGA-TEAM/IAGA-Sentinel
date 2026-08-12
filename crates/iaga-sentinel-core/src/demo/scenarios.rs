@@ -72,18 +72,27 @@ pub fn demo_workspace_policies() -> Vec<WorkspacePolicy> {
                     allowed_action_types: vec![ActionType::FileRead],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "http.fetch".into(),
                     allowed_action_types: vec![ActionType::Http],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    // A generic fetch takes its destination from the caller, so
+                    // the allowlist is enforced fail-closed: a payload that
+                    // exposes none of these keys is blocked rather than skipping
+                    // the domain check. Contrast an LLM SDK call, which is also
+                    // an `Http` action but declares nothing, because its
+                    // destination is the provider's, not the payload's.
+                    destination_fields: ToolPolicy::default_egress_fields(),
                 },
                 ToolPolicy {
                     tool_name: "terminal.exec".into(),
                     allowed_action_types: vec![ActionType::Shell],
                     max_decision: GovernanceDecision::Review,
                     requires_human_review: true,
+                    ..Default::default()
                 },
             ],
             threshold_block: 70,
@@ -103,24 +112,28 @@ pub fn demo_workspace_policies() -> Vec<WorkspacePolicy> {
                     allowed_action_types: vec![ActionType::Shell],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "hostname".into(),
                     allowed_action_types: vec![ActionType::Shell],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "whoami".into(),
                     allowed_action_types: vec![ActionType::Shell],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "true".into(),
                     allowed_action_types: vec![ActionType::Shell],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
             ],
             threshold_block: 70,

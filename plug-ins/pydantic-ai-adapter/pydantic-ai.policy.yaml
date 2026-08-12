@@ -1,5 +1,5 @@
 # Registers the "pydantic-ai-demo" agent.
-#   iaga import examples/integrations/pydantic-ai/pydantic-ai.policy.yaml
+#   iaga import plug-ins/pydantic-ai-adapter/pydantic-ai.policy.yaml
 profiles:
   - agentId: pydantic-ai-demo
     workspaceId: ws-pydantic-ai

@@ -112,6 +112,7 @@ mod tests {
                 allowed_action_types: vec![ActionType::Custom],
                 max_decision: GovernanceDecision::Allow,
                 requires_human_review: false,
+                ..Default::default()
             }],
             allowed_domains: vec!["api.acme.com".into()],
             threshold_block: 55,

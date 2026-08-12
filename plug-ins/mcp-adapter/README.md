@@ -13,13 +13,14 @@ block/review → the call is refused. One signed receipt per `tools/call`.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 Register the agent (unregistered agents return 404):
 
 ```bash
-./target/release/iaga import examples/integrations/mcp/mcp.policy.yaml
+./target/release/iaga import plug-ins/mcp-adapter/mcp.policy.yaml
 ```
 
 ## Run

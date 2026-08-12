@@ -23,7 +23,7 @@ members = [
 ]
 
 [workspace.package]
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 # Minimum Supported Rust Version. Floor set by transitive deps in Cargo.lock
 # (`home 0.5.12` needs 1.88); bump deliberately, note it in CHANGELOG.md.
@@ -52,7 +52,10 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 thiserror = "2"
 async-trait = "0.1"
-anyhow = "1"
+# ponytail: `anyhow = "1"` used to sit here. No crate in the workspace inherited
+# it; every crate uses `thiserror` for its own error types. Removing the
+# template entry changes nothing in the resolve - anyhow stays in Cargo.lock
+# transitively.
 # crypto primitives for iaga-sentinel-receipts (Ed25519 + SHA-256)
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"

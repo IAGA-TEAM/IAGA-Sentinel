@@ -670,6 +670,7 @@ fn make_tool_policy(
         allowed_action_types: allowed_actions,
         max_decision,
         requires_human_review: requires_review,
+        ..Default::default()
     }
 }
 

@@ -17,7 +17,7 @@ dance, builds clean on Linux / macOS / Windows. GPU acceleration and
 the `ort` (ONNX Runtime native) backend ship in IAGA Sentinel
 Enterprise as part of the curated ML model library, see
 [`docs/adr/0010-oss-enterprise-boundary.md`](../../docs/adr/0010-oss-enterprise-boundary.md)
-(categories #10 + #19).
+(see the Enterprise bullet on curated model libraries).
 
 ## Configuring models
 
@@ -54,8 +54,9 @@ The MVP tokenizer is a hash bag of byte n-grams projected to a fixed
 a real linguistic tokenizer and you cannot pair it with off-the-shelf
 HuggingFace models. The HuggingFace tokenizer integration + curated
 calibration framework ship in IAGA Sentinel Enterprise as part of the
-curated ML model library (category #19 in
-[ADR 0010](../../docs/adr/0010-oss-enterprise-boundary.md)). The OSS
+curated ML model library (see
+[ADR 0010](../../docs/adr/0010-oss-enterprise-boundary.md), Decision →
+Enterprise scope). The OSS
 BYO ONNX path remains: bring any model that accepts the `[1, 64]`
 float32 input, or train a small classifier on top of the same hash
 features.

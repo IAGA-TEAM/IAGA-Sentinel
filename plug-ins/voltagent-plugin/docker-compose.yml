@@ -5,16 +5,24 @@
 #   docker compose run --rm example     # run the gate demo against it
 #
 # Open mode (IAGA_SENTINEL_OPEN_MODE=true) is for local demos only. In
-# production, drop open mode and pass an API key (IAGA_SENTINEL_API_KEY).
+# production, drop open mode and mint a server key (`iaga gen-key`, or
+# IAGA_SENTINEL_BOOTSTRAP_API_KEY on the sidecar; the plug-in then sends it as
+# IAGA_SENTINEL_API_KEY, which is the client-side name).
 services:
   sentinel:
-    image: ghcr.io/iaga-team/iaga-sentinel:v2.0.1
+    # Built from this repo, not pulled: no image is published yet (see the root
+    # README). Compose builds it on first `up` and reuses the tag afterwards.
+    image: iaga-sentinel:local
+    build:
+      context: ../..
     command: ["serve"]
     environment:
       IAGA_SENTINEL_OPEN_MODE: "true"
       PORT: "4010"
+    # Loopback-only publish: open mode makes every unauthenticated caller an implicit
+    # ADMIN, so a bare "4010:4010" would expose the signed decision log to the LAN.
     ports:
-      - "4010:4010"
+      - "127.0.0.1:4010:4010"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:4010/health"]
       interval: 5s

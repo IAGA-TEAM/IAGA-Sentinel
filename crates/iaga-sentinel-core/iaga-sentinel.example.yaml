@@ -51,10 +51,15 @@ workspaces:
     allowedProtocols:
       - mcp
       - http-function
+    # Bare hosts, matched for equality against the destination's host after
+    # normalisation. There is NO wildcard support: this list used to read
+    # `*.openai.com` / `*.github.com`, which match nothing, so anyone who copied
+    # this file had every call to those hosts blocked by the egress rule. List
+    # each host you actually call.
     allowedDomains:
-      - "*.openai.com"
+      - "api.openai.com"
       - "api.anthropic.com"
-      - "*.github.com"
+      - "api.github.com"
     tools:
       - toolName: file.read
         allowedActionTypes:
@@ -74,11 +79,28 @@ workspaces:
         maxDecision: review
         requiresHumanReview: true
 
+      # `destinationFields` names the payload keys that carry this tool's egress
+      # target. Declaring them makes the domain allowlist FAIL CLOSED: a payload
+      # that exposes none of these keys is refused rather than quietly skipping
+      # the allowlist. Without the declaration only `destination`/`url`/
+      # `endpoint`/`href` are probed, so a caller naming its target `target` or
+      # `uri` slips past the check entirely.
+      #
+      # Declare it only for tools whose destination really is caller-supplied.
+      # An LLM SDK call (`openai.chat.completions.create`) has its endpoint baked
+      # into the client, so declaring there would refuse every legitimate call.
       - toolName: http.fetch
         allowedActionTypes:
           - http
         maxDecision: allow
         requiresHumanReview: false
+        destinationFields:
+          - destination
+          - url
+          - uri
+          - endpoint
+          - href
+          - target
 
       - toolName: db.query
         allowedActionTypes:

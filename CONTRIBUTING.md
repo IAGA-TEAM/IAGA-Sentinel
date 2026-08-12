@@ -33,9 +33,11 @@ database is reachable, so an unset variable looks like a pass. Point them at
 one to actually run them:
 
 ```bash
-docker run -d --name iaga-pg -p 5432:5432 \
+docker run -d --name iaga-pg -p 127.0.0.1:5432:5432 \
   -e POSTGRES_USER=sentinel -e POSTGRES_PASSWORD=sentinel \
   -e POSTGRES_DB=sentinel_test postgres:16
+# throwaway credentials in cleartext above, and POSTGRES_USER is a superuser in the
+# official image — keep the publish on loopback.
 export IAGA_SENTINEL_TEST_PG_URL="postgres://sentinel:sentinel@localhost:5432/sentinel_test"
 cargo test -p iaga-sentinel-receipts --features postgres
 ```

@@ -1022,6 +1022,12 @@ async fn cmd_serve(
             // Prune in-memory state
             let taint_pruned =
                 iaga_sentinel::modules::taint::taint_tracker::prune_stale_sessions(ttl);
+            // The agent-scoped twin accumulates on EVERY request (so that
+            // enabling the window later does not start from an empty store), so
+            // it grows whether or not aggregation is switched on and must be
+            // pruned unconditionally too.
+            let agent_taint_pruned =
+                iaga_sentinel::modules::taint::taint_tracker::prune_stale_agents(ttl);
             let session_pruned =
                 iaga_sentinel::modules::session_graph::session_dag::prune_stale_sessions(ttl_ms);
             let challenge_pruned =
@@ -1054,9 +1060,14 @@ async fn cmd_serve(
                 .await
                 .map_err(|e| tracing::warn!(error = %e, "DB prune: taint"));
 
-            if taint_pruned > 0 || session_pruned > 0 || challenge_pruned > 0 {
+            if taint_pruned > 0
+                || agent_taint_pruned > 0
+                || session_pruned > 0
+                || challenge_pruned > 0
+            {
                 tracing::debug!(
                     taint_pruned,
+                    agent_taint_pruned,
                     session_pruned,
                     challenge_pruned,
                     "TTL cleanup completed"
@@ -1366,10 +1377,59 @@ fn cmd_validate(config_path: &str) {
             println!("  {} workspace policies", config.workspaces.len());
             let total_tools: usize = config.workspaces.iter().map(|w| w.tools.len()).sum();
             println!("  {} tool policies", total_tools);
+            print_policy_lint(&config.workspaces);
         }
         Err(e) => {
             eprintln!("Invalid config: {e}");
             process::exit(1);
+        }
+    }
+}
+
+/// The governance half of `validate`: "the schema parsed" is not the same
+/// question as "this policy governs what you think it governs".
+///
+/// `formal_verify::verify_policy` already answers the second one — it is what
+/// fills `policyVerification` on every `/v1/inspect` response and backs
+/// `GET /v1/policy/verify/{ws}`. Both of those need a running server, so an
+/// operator writing a policy file had no pre-flight way to reach it, and
+/// `validate` happily printed "Config is valid!" over a workspace whose HTTP
+/// tool declares no `destinationFields` (its domain allowlist is then applied
+/// by a fixed four-name probe and skipped entirely for any other key).
+///
+/// Advisory on purpose: these are lints, not schema errors, so the exit code
+/// does not change — a policy that has not adopted `destinationFields` is still
+/// a legal policy and failing it here would break every existing config.
+///
+/// `critical` issues are labelled `error` rather than `warning` even so.
+/// `formal_verify` reserves that level for contradictions — two entries for
+/// one tool with conflicting `maxDecision`, where the policy does not mean one
+/// thing — and printing that as a `warning` under a "Config is valid!"
+/// headline reads as advisory when it is not. `high` stays a warning: it
+/// covers deliberate postures such as deny-all egress.
+fn print_policy_lint(workspaces: &[iaga_sentinel::core::types::WorkspacePolicy]) {
+    use iaga_sentinel::modules::policy::formal_verify;
+
+    for ws in workspaces {
+        for issue in formal_verify::verify_policy(ws).issues {
+            // `critical` only. `high` covers postures that are legal and often
+            // deliberate — "HTTP tools but no allowedDomains" is deny-all egress,
+            // which is a safe configuration, not an error.
+            let label = if issue.severity == "critical" {
+                "error"
+            } else {
+                "warning"
+            };
+            println!();
+            println!(
+                "{label} [{}] {}: {}",
+                issue.severity, issue.category, ws.workspace_id
+            );
+            println!("  {}", issue.description);
+            if !issue.affected_tools.is_empty() {
+                println!("  tools: {}", issue.affected_tools.join(", "));
+            }
+            println!("  fix: {}", issue.suggestion);
         }
     }
 }
@@ -1882,6 +1942,11 @@ async fn cmd_import(config_path: &str, db_url: &str) {
             process::exit(1);
         })
     };
+
+    // The same lint `validate` prints. `import` is the other half of the
+    // pre-flight — it is what actually installs the policy — and an operator
+    // who goes straight to it would otherwise never see the warning.
+    print_policy_lint(&config.workspaces);
 
     let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
         eprintln!("{e}");

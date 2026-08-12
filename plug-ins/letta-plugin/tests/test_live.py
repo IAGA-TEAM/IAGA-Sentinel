@@ -4,7 +4,7 @@ Auto-skips unless both servers are reachable and an LLM model handle is configur
 Prerequisites (see README quickstart):
 
     # IAGA sidecar (open mode) on :4010, with the demo agent registered
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve
     ./target/release/iaga import tests/letta_demo_policy.yaml      # or the inline policy below
 
     # OSS Letta server on :8283, with an LLM key in its env

@@ -16,20 +16,21 @@ swallowing it, and is dependency-light (it does not import langchain).
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/langchain/langchain.policy.yaml
+./target/release/iaga import plug-ins/langchain-adapter/langchain.policy.yaml
 ```
 
 ## 3. Run
 
 ```bash
 pip install langchain-core iaga-sentinel
-python examples/integrations/langchain/python_example.py
+python plug-ins/langchain-adapter/python_example.py
 ```
 
 Attach the handler anywhere LangChain accepts callbacks:

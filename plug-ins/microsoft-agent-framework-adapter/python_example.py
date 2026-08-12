@@ -1,7 +1,7 @@
 """Govern a Microsoft Agent Framework agent's tools with IAGA Sentinel.
 
     pip install agent-framework iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then run your agent.
 
 `sentinel_middleware` is a function-invocation middleware `async (context,

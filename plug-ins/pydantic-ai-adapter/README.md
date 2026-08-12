@@ -23,13 +23,14 @@ excluded from the inspected payload.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/pydantic-ai/pydantic-ai.policy.yaml
+./target/release/iaga import plug-ins/pydantic-ai-adapter/pydantic-ai.policy.yaml
 ```
 
 Pass `tool_name=` to map the tool to an approved name (the example uses
@@ -39,7 +40,7 @@ Pass `tool_name=` to map the tool to an approved name (the example uses
 
 ```bash
 pip install pydantic-ai iaga-sentinel
-python examples/integrations/pydantic-ai/python_example.py
+python plug-ins/pydantic-ai-adapter/python_example.py
 ```
 
 ## Receipts

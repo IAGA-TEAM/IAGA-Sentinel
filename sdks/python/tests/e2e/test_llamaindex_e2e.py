@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("llama_index.core")
+pytest.importorskip("llama_index.core.tools")
 
 from llama_index.core.callbacks import CBEventType, EventPayload  # noqa: E402
 from llama_index.core.tools import FunctionTool  # noqa: E402

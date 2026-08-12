@@ -11,7 +11,11 @@
     All three beats share one sessionId, so their signed receipts form a single
     hash-chained run. The driver then exports that run and verifies it offline
     with iaga-verify (no server, no DB, no network) - twice: against the key
-    embedded in the export, then against the same key pinned explicitly.
+    embedded in the export, then with that key stated explicitly plus
+    --expect-count. The key comes from the export either way, so the second
+    call silences the self-asserted warning rather than authenticating
+    authorship; the count is the external anchor that catches a chain that
+    is not the one this take drove.
 
     Nothing is faked: every verdict comes from POST /v1/inspect on the running
     server, and the scenario payloads are fetched live from the server itself.
@@ -127,7 +131,13 @@ foreach ($b in $beats) {
     Write-Verdict $decision $score
 
     Write-Host '  Why:' -ForegroundColor DarkGray
-    foreach ($reason in @($resp.risk.reasons | Select-Object -First 4)) {
+    # Policy/budget attributions are APPENDED to risk.reasons, so a plain
+    # "first four" drops exactly the line that names the rule that refused.
+    # Show them first, then fill the rest with baseline reasons.
+    $allReasons = @($resp.risk.reasons)
+    $attributed = @($allReasons | Where-Object { $_ -match '^(dictum\[|cost:)' })
+    $baseline   = @($allReasons | Where-Object { $_ -notmatch '^(dictum\[|cost:)' })
+    foreach ($reason in @($attributed + $baseline | Select-Object -First 4)) {
         Write-Host ("    - {0}" -f $reason) -ForegroundColor DarkGray
     }
     if ($resp.reviewRequestId) {
@@ -170,9 +180,16 @@ $chain  = Get-Content $ChainPath -Raw | ConvertFrom-Json
 $pubHex = $chain.signer_verifying_key
 $runId  = $chain.run_id
 $count  = @($chain.receipts).Count
+# How many receipts THIS take is entitled to. The run_id is <agentId>:<sessionId>
+# and the sessionId is fixed, so a second driver run against a server that is
+# still up appends to the same chain instead of starting a new one: the export
+# comes back with 6 receipts and every verdict assertion still passes, because
+# the verdicts really were Allow/Review/Block both times. Without this anchor
+# the take prints a green CHAIN OK over a chain that is not the one you drove.
+$expected = $beats.Count
 Write-Host ''
 Write-Host ("  run_id   : {0}" -f $runId) -ForegroundColor White
-Write-Host ("  receipts : {0}   (seq 0,1,2 = Allow, Review, Block)" -f $count) -ForegroundColor White
+Write-Host ("  receipts : {0}   (this take drove {1}: Allow, Review, Block)" -f $count, $expected) -ForegroundColor White
 Write-Host ("  pub key  : {0}" -f $pubHex) -ForegroundColor DarkGray
 Write-Host ''
 
@@ -181,10 +198,22 @@ Write-Host ("> iaga-verify {0}" -f $ChainFile) -ForegroundColor Cyan
 & $VerifyExe $ChainPath | ForEach-Object { Write-Host $_ -ForegroundColor Green }
 $embeddedExit = $LASTEXITCODE
 
-# Verify against the PINNED public key (authenticates authorship, no warning).
+# Verify again with the key stated explicitly AND with the receipt count this
+# take drove.
+#
+# Note what this second call does and does not prove. The key comes from
+# chain.json itself (`$chain.signer_verifying_key`), so passing it back only
+# silences the self-asserted warning — it cannot authenticate authorship,
+# because a forger who re-signed the chain would have supplied their own key
+# here too. Authenticating authorship means pinning a key you obtained OUT OF
+# BAND (your key file, a published fingerprint) and passing that. The count,
+# by contrast, is a real external anchor: it comes from what this driver drove,
+# not from the file. `CHAIN OK` alone proves PREFIX
+# integrity, so it is silent about both truncation and a chain that grew past
+# the run you recorded; --expect-count is the external anchor that catches both.
 Write-Host ''
-Write-Host ("> iaga-verify {0} --key {1}" -f $ChainFile, $pubHex) -ForegroundColor Cyan
-$pinnedOut = & $VerifyExe $ChainPath --key $pubHex
+Write-Host ("> iaga-verify {0} --key {1} --expect-count {2}" -f $ChainFile, $pubHex, $expected) -ForegroundColor Cyan
+$pinnedOut = & $VerifyExe $ChainPath --key $pubHex --expect-count $expected
 $pinnedExit = $LASTEXITCODE
 $pinnedOut | ForEach-Object { Write-Host $_ -ForegroundColor Green }
 
@@ -194,5 +223,10 @@ if (($embeddedExit -eq 0) -and ($pinnedExit -eq 0)) {
     Write-Host '  The terminal receipt cryptographically attests the BLOCK.' -ForegroundColor Green
 } else {
     Write-Banner ("VERIFY FAILED  (embedded exit={0}, pinned exit={1})" -f $embeddedExit, $pinnedExit) 'White' 'Red'
+    if ($count -ne $expected) {
+        Write-Host ("  The chain holds {0} receipts but this take drove {1}. A stale server is still" -f $count, $expected) -ForegroundColor Red
+        Write-Host ('  up and the previous take is chained into the same run_id: stop it, then re-run') -ForegroundColor Red
+        Write-Host ('  .\scripts\demo.ps1 (it wipes the DB and re-seeds). Do NOT use this take.') -ForegroundColor Red
+    }
     exit 1
 }

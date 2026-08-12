@@ -16,20 +16,21 @@ callable — `guard(tool_name, payload, action_type)` returns the payload when a
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/crewai/crewai.policy.yaml
+./target/release/iaga import plug-ins/crewai-adapter/crewai.policy.yaml
 ```
 
 ## 3. Run
 
 ```bash
 pip install crewai iaga-sentinel
-python examples/integrations/crewai/python_example.py
+python plug-ins/crewai-adapter/python_example.py
 ```
 
 ```python

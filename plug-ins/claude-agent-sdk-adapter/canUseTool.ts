@@ -4,11 +4,11 @@
  * inspected first; IAGA denies dangerous ones (e.g. `curl ... | sh`).
  *
  *   npm i @anthropic-ai/claude-agent-sdk @iaga-sentinel/sdk
- *   IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+ *   IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
  *   # register the agent first (see README.md), then run with tsx:
- *   npx tsx examples/integrations/claude-agent-sdk/canUseTool.ts
+ *   npx tsx plug-ins/claude-agent-sdk-adapter/canUseTool.ts
  *
- * See examples/integrations/claude-agent-sdk/ for the full example.
+ * See plug-ins/claude-agent-sdk-adapter/ for the full example.
  */
 import { pathToFileURL } from "node:url";
 import {

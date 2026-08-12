@@ -53,7 +53,7 @@ spec:
         - name: {{ .Chart.Name }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ required "image.tag is required: no image is published yet, so there is no safe default to pull. Build and push to your own registry, then --set image.repository=<repo> --set image.tag=<tag>. See charts/iaga-sentinel/README.md." .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
           ports:
@@ -87,6 +87,18 @@ spec:
             {{- end }}
             {{- with .Values.config.reasoningModels }}
             - name: IAGA_SENTINEL_REASONING_MODELS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.taintAgentWindowSecs }}
+            # Multi-step taint correlation is keyed on the client-declared
+            # `metadata.sessionId`, so a caller that rotates it between steps is
+            # not correlated across them. Setting this folds in the labels an
+            # agent accumulated in its OTHER sessions within the window.
+            #
+            # The store is per-process and in-memory: with replicas > 1 an agent
+            # correlates only against the pod that happens to serve it, and
+            # nothing survives a restart. Treat it as best-effort.
+            - name: IAGA_SENTINEL_TAINT_AGENT_WINDOW_SECS
               value: {{ . | quote }}
             {{- end }}
             {{- with .Values.config.cleanupIntervalSecs }}
@@ -141,7 +153,7 @@ spec:
           envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-          {{- if or .Values.livenessProbe.enabled .Values.readinessProbe.enabled }}
+          {{- if .Values.livenessProbe.enabled }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             httpGet:
@@ -152,6 +164,15 @@ spec:
             timeoutSeconds: {{ .timeoutSeconds }}
             failureThreshold: {{ .failureThreshold }}
           {{- end }}
+          {{- end }}
+          {{- /*
+            One `if .enabled` per probe. `with` tests the map for emptiness, not
+            for `.enabled`, and values.yaml always populates BOTH maps with six
+            keys - so the previous `if or .liveness.enabled .readiness.enabled`
+            wrapper rendered both probes unless both were disabled, and
+            `--set livenessProbe.enabled=false` did nothing at all.
+          */}}
+          {{- if .Values.readinessProbe.enabled }}
           {{- with .Values.readinessProbe }}
           readinessProbe:
             httpGet:

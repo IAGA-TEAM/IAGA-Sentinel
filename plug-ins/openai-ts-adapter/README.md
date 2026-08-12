@@ -15,13 +15,14 @@ firewall **before** any OpenAI spend.
 
 ```bash
 cargo build --release --workspace
-IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+# open mode makes every unauthenticated caller an implicit ADMIN; the default bind host is 0.0.0.0
+IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```
 
 ## 2. Register the agent
 
 ```bash
-./target/release/iaga import examples/integrations/openai-ts/openai-ts.policy.yaml
+./target/release/iaga import plug-ins/openai-ts-adapter/openai-ts.policy.yaml
 ```
 
 ## 3. Run
@@ -29,7 +30,7 @@ IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
 ```bash
 npm i openai @iaga-sentinel/sdk
 # Set OPENAI_API_KEY in your shell, then:
-npx tsx examples/integrations/openai-ts/ts_example.ts
+npx tsx plug-ins/openai-ts-adapter/ts_example.ts
 ```
 
 ```ts

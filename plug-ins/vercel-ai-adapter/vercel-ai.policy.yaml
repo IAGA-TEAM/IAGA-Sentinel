@@ -1,5 +1,5 @@
 # Registers the "vercel-ai-demo" agent.
-#   iaga import examples/integrations/vercel-ai/vercel-ai.policy.yaml
+#   iaga import plug-ins/vercel-ai-adapter/vercel-ai.policy.yaml
 profiles:
   - agentId: vercel-ai-demo
     workspaceId: ws-vercel-ai

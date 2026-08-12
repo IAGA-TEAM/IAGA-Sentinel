@@ -2,9 +2,9 @@
  * Govern a LangGraph.js agent's tools with IAGA Sentinel.
  *
  *   npm i @langchain/langgraph @langchain/openai @langchain/core zod @iaga-sentinel/sdk
- *   IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+ *   IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
  *   # register an agent that allows your tools (see README.md), then:
- *   node examples/integrations/langgraph/js_example.mjs
+ *   node plug-ins/langgraph-adapter/js_example.mjs
  *
  * governedToolNode is a drop-in for langgraph's ToolNode: it inspects each tool
  * call through IAGA Sentinel first. Allowed calls run and are receipted; blocked

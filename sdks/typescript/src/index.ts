@@ -25,6 +25,7 @@ export type {
   InspectRequest,
   JsonObject,
   JsonValue,
+  LayerRole,
   OpenAIAdapterOptions,
   PluginOutput,
   PluginResult,

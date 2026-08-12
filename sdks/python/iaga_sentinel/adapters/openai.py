@@ -6,10 +6,16 @@ See plug-ins/openai-adapter/ for a runnable example.
 from __future__ import annotations
 
 import inspect
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from ..types import ActionType
-from ._common import AdapterConfig, run_guarded_async, run_guarded_sync, serialize_args
+from ._common import (
+    AdapterConfig,
+    resolve_action_type,
+    run_guarded_async,
+    run_guarded_sync,
+    serialize_args,
+)
 
 
 class _ResponsesAdapter:
@@ -20,7 +26,12 @@ class _ResponsesAdapter:
         payload = serialize_args(args, kwargs)
         return self._wrapper._run(
             tool_name="openai.responses.create",
-            action_type=ActionType.HTTP,
+            # Both tool names this wrapper can emit really are http, so that
+            # stays the default — but a declared type must still win, or the
+            # constructor accepts `action_types` and ignores it.
+            action_type=resolve_action_type(
+                self._wrapper._config, "openai.responses.create", default=ActionType.HTTP
+            ),
             payload=payload,
             call=lambda: self._wrapper._client.responses.create(*args, **kwargs),
         )
@@ -34,7 +45,11 @@ class _ChatCompletionsAdapter:
         payload = serialize_args(args, kwargs)
         return self._wrapper._run(
             tool_name="openai.chat.completions.create",
-            action_type=ActionType.HTTP,
+            action_type=resolve_action_type(
+                self._wrapper._config,
+                "openai.chat.completions.create",
+                default=ActionType.HTTP,
+            ),
             payload=payload,
             call=lambda: self._wrapper._client.chat.completions.create(*args, **kwargs),
         )
@@ -100,6 +115,7 @@ def sentinel_wrap_openai(
     session_id: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
     fail_closed: bool = False,
+    action_types: Optional[Mapping[str, ActionType]] = None,
 ) -> SentinelOpenAIWrapper:
     return SentinelOpenAIWrapper(
         client,
@@ -113,6 +129,7 @@ def sentinel_wrap_openai(
             session_id=session_id,
             metadata=metadata,
             fail_closed=fail_closed,
+            action_types=action_types,
         ),
     )
 

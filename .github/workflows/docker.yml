@@ -34,7 +34,9 @@ jobs:
           # that used to sit here claimed CI had published to `ghcr.io/iaga-team`
           # since 1.9.0. It has not: the organisation has **no packages at all**,
           # and the only published image is `ghcr.io/edoardobambini/iaga-sentinel`,
-          # last updated 2026-06-16 (the 1.6 line). On the v2.0.1 tag this step
+          # whose newest tag is v1.8.1 (measured 2026-08-09 against the registry:
+          # tags = main, latest, v1.7.0-v1.7.2, v1.8.0, v1.8.1 — not the 1.6 line an
+          # earlier revision of this comment claimed). On the v2.0.1 tag this step
           # uploaded every layer and then failed the manifest with HTTP 403.
           #
           # A 403 at manifest time, after the blobs went through, is a permission

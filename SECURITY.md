@@ -7,9 +7,12 @@
 | 2.0.x   | Yes       |
 
 Older lines are not patched. Receipts produced by any earlier release keep
-verifying — the receipt schema has not changed since 1.3.0, and the offline
-verifiers accept every chain they ever produced — so upgrading does not
-invalidate evidence you have already exported.
+verifying. The receipt body *has* gained fields since 1.3.0 — `is_authoritative`
+in 1.3.1, `usage` in 1.5 — but every one of them was additive and is elided from
+the signed bytes when it is not populated, so an older receipt hashes and
+verifies exactly as it did the day it was minted. The offline verifiers accept
+every chain they ever produced, and upgrading does not invalidate evidence you
+have already exported.
 
 ## Reporting a Vulnerability
 

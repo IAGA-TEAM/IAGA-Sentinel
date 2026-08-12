@@ -10,7 +10,7 @@ import asyncio
 
 import pytest
 
-pytest.importorskip("pydantic_ai")
+pytest.importorskip("pydantic_ai.models.test")
 
 from pydantic_ai import Agent, RunContext  # noqa: E402
 from pydantic_ai.models.test import TestModel  # noqa: E402

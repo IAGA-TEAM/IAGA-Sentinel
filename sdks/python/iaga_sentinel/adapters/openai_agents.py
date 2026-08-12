@@ -17,13 +17,13 @@ See plug-ins/openai-agents-adapter/ for a runnable example.
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import httpx
 
 from ..client import AsyncSentinelClient
 from ..types import ActionType
-from ._common import AdapterConfig, build_request, governed_callable, infer_action_type
+from ._common import AdapterConfig, build_request, governed_callable, resolve_action_type
 
 
 def governed_tool(
@@ -35,6 +35,7 @@ def governed_tool(
     tool_name: Optional[str] = None,
     action_type: Optional[ActionType] = None,
     fail_closed: bool = False,
+    action_types: Optional[Mapping[str, ActionType]] = None,
     workspace_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -50,6 +51,7 @@ def governed_tool(
         session_id=session_id,
         metadata=metadata,
         fail_closed=fail_closed,
+        action_types=action_types,
     )
 
     def decorator(func: Callable) -> Callable:
@@ -123,6 +125,7 @@ def iaga_tool_guardrail(
     api_key: Optional[str] = None,
     framework: str = "openai-agents",
     fail_closed: bool = False,
+    action_types: Optional[Mapping[str, ActionType]] = None,
     workspace_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -149,6 +152,7 @@ def iaga_tool_guardrail(
         session_id=session_id,
         metadata=metadata,
         fail_closed=fail_closed,
+        action_types=action_types,
     )
 
     async def guardrail(data: Any) -> Any:
@@ -157,7 +161,7 @@ def iaga_tool_guardrail(
         request = build_request(
             config,
             tool_name=tool_name,
-            action_type=infer_action_type(tool_name),
+            action_type=resolve_action_type(config, tool_name),
             payload=_guardrail_payload(ctx),
         )
         try:

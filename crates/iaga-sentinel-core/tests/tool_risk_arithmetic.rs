@@ -148,7 +148,8 @@ fn all_layers_saturated_without_pattern_risk_sum_to_ninety_five() {
     assert_eq!(
         score_of(&layers, GovernanceDecision::Allow),
         95,
-        "the seven layer slots must sum to 0.95; the remaining 0.15 is the          pattern slot, which this request deliberately leaves at zero"
+        "the seven layer slots must sum to 0.95; the remaining 0.15 is the \
+         pattern slot, which this request deliberately leaves at zero"
     );
 }
 

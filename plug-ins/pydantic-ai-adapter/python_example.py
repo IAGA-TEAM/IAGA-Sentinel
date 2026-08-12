@@ -1,7 +1,7 @@
 """Govern a Pydantic AI agent's tools with IAGA Sentinel.
 
     pip install pydantic-ai iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register the agent (see README.md), then run your agent.
 
 `governed_tool` wraps a tool so each call is inspected through IAGA before the

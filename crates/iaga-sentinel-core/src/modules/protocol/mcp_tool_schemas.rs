@@ -108,9 +108,23 @@ fn validate_http_fetch(payload: &HashMap<String, Value>) -> (bool, Vec<String>) 
             if matches!(s.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") => {}
         _ => hard.push("method: Expected one of GET, POST, PUT, PATCH, DELETE".to_string()),
     }
-    match payload.get("destination") {
-        Some(Value::String(s)) if !s.is_empty() => {}
-        _ => hard.push("destination: Required".to_string()),
+    // Any of the names the egress layer recognises, not `destination` alone.
+    //
+    // The policy layer host-checks `url`, `uri`, `endpoint`, `href` and `target`
+    // as well (`DEFAULT_EGRESS_DESTINATION_FIELDS`), so requiring exactly
+    // `destination` here made the two disagree: under `ProtocolKind::Mcp` a
+    // `{method, url}` call — which the policy layer checks correctly against the
+    // domain allowlist — was refused by schema validation before it got there.
+    // Two layers with different ideas of what names a destination is how a
+    // caller ends up choosing the name that neither one checks.
+    let has_destination = crate::core::types::DEFAULT_EGRESS_DESTINATION_FIELDS
+        .iter()
+        .any(|k| matches!(payload.get(*k), Some(Value::String(s)) if !s.trim().is_empty()));
+    if !has_destination {
+        hard.push(format!(
+            "destination: Required (one of {})",
+            crate::core::types::DEFAULT_EGRESS_DESTINATION_FIELDS.join(", ")
+        ));
     }
     let mut advisory = Vec::new();
     check_intent_advisory(payload, &mut advisory);
@@ -185,6 +199,76 @@ mod tests {
         );
         assert!(!valid, "a write without content is malformed");
         assert!(findings.iter().any(|f| f.contains("content: Required")));
+    }
+
+    /// `http.fetch` had NO schema test at all, which is how the widening below
+    /// shipped uncovered.
+    #[test]
+    fn http_fetch_accepts_any_declared_destination_name() {
+        for key in [
+            "destination",
+            "url",
+            "uri",
+            "endpoint",
+            "href",
+            "target",
+            "webhook",
+        ] {
+            let (valid, findings) = validate_schema(
+                "http.fetch",
+                &payload(&[
+                    ("method", json!("GET")),
+                    (key, json!("https://example.com/x")),
+                ]),
+            );
+            assert!(
+                valid,
+                "`{key}` is one of DEFAULT_EGRESS_DESTINATION_FIELDS and must be \
+                 accepted, or the schema refuses calls the policy layer checks \
+                 correctly: {findings:?}"
+            );
+        }
+    }
+
+    /// The widening is what makes the tier-3 bare-host exception necessary:
+    /// three of the seven names accepted here are NOT read by the legacy
+    /// tier-2 probe (`destination`/`url`/`endpoint`/`href`).
+    #[test]
+    fn http_fetch_accepts_names_the_legacy_egress_probe_does_not_read() {
+        let legacy = ["destination", "url", "endpoint", "href"];
+        let beyond: Vec<&str> = crate::core::types::DEFAULT_EGRESS_DESTINATION_FIELDS
+            .iter()
+            .copied()
+            .filter(|k| !legacy.contains(k))
+            .collect();
+        assert_eq!(
+            beyond,
+            vec!["uri", "target", "webhook"],
+            "the set of schema-accepted names outside the legacy probe changed; \
+             the tier-3 bare-host exception in evaluate_policy.rs is scoped to it"
+        );
+    }
+
+    #[test]
+    fn http_fetch_without_any_destination_is_invalid() {
+        let (valid, findings) = validate_schema(
+            "http.fetch",
+            &payload(&[("method", json!("GET")), ("data", json!("cGF5bG9hZA=="))]),
+        );
+        assert!(!valid, "a fetch with no destination at all is malformed");
+        assert!(
+            findings.iter().any(|f| f.contains("destination: Required")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn http_fetch_rejects_a_blank_destination() {
+        let (valid, _) = validate_schema(
+            "http.fetch",
+            &payload(&[("method", json!("GET")), ("url", json!("   "))]),
+        );
+        assert!(!valid, "a whitespace-only destination must not satisfy it");
     }
 
     #[test]

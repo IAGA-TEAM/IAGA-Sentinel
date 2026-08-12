@@ -61,8 +61,13 @@ pub struct DbOperation {
 
 static PENDING: Lazy<Mutex<HashMap<String, SandboxResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static COMPLETED: Lazy<Mutex<HashMap<String, SandboxResult>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+
+// ponytail: a `COMPLETED` map used to sit here. `get_sandbox_result` was its
+// only reader and had no call sites, so removing that function left an
+// unbounded process-global map that was written on every completed, approved
+// and rejected sandbox and read by nothing, with no eviction - a pure leak.
+// Nothing is lost: `approve_sandbox`/`reject_sandbox` already RETURN the result
+// to their caller, which is how the HTTP handlers serve it.
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -391,13 +396,10 @@ pub fn sandbox_execute(
         timestamp: now_ms(),
     };
 
+    // Only work awaiting a human is retained; a completed sandbox is returned
+    // to the caller and not stored (see the note on the removed COMPLETED map).
     if requires_approval {
         PENDING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(execution_id, result.clone());
-    } else {
-        COMPLETED
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(execution_id, result.clone());
@@ -424,10 +426,6 @@ pub fn approve_sandbox(id: &str) -> Option<SandboxResult> {
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut r) = pending.remove(id) {
         r.approval_status = "approved".into();
-        COMPLETED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id.to_string(), r.clone());
         Some(r)
     } else {
         None
@@ -439,10 +437,6 @@ pub fn reject_sandbox(id: &str) -> Option<SandboxResult> {
     if let Some(mut r) = pending.remove(id) {
         r.approval_status = "rejected".into();
         r.status = "blocked".into();
-        COMPLETED
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id.to_string(), r.clone());
         Some(r)
     } else {
         None
@@ -458,17 +452,6 @@ pub fn list_pending() -> Vec<SandboxResult> {
         .collect()
 }
 
-pub fn get_sandbox_result(id: &str) -> Option<SandboxResult> {
-    PENDING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(id)
-        .cloned()
-        .or_else(|| {
-            COMPLETED
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(id)
-                .cloned()
-        })
-}
+// ponytail: `get_sandbox_result(id)` used to live here. It was the only reader
+// of the COMPLETED map and had zero call sites anywhere in crates/, sdks/ or
+// plug-ins/ - no route, no CLI path, no test.

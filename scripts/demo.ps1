@@ -88,6 +88,9 @@ if (-not $KeepDb) {
 }
 
 # 3. Environment: open mode (no API key needed for the demo) + no incremental.
+# Bind to loopback explicitly: open mode makes every unauthenticated caller
+# an implicit ADMIN, and the server's own default host is 0.0.0.0.
+$env:IAGA_SENTINEL_HOST      = '127.0.0.1'
 $env:IAGA_SENTINEL_OPEN_MODE = 'true'
 $env:CARGO_INCREMENTAL       = '0'
 $env:PORT                    = "$Port"

@@ -2,9 +2,9 @@
 
 Setup:
     pip install langgraph langchain-openai langchain-core iaga-sentinel
-    IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+    IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
     # register an agent that allows your tools (see README.md), then:
-    python examples/integrations/langgraph/python_example.py
+    python plug-ins/langgraph-adapter/python_example.py
 
 `GovernedToolNode` is a drop-in replacement for langgraph's `ToolNode`: it
 inspects every tool call through IAGA Sentinel before running it. Allowed calls

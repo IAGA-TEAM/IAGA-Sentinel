@@ -179,6 +179,18 @@ class GovernanceResult:
     audit_event: JsonDict = field(default_factory=dict)
     profile: JsonDict = field(default_factory=dict)
     workspace_policy: JsonDict = field(default_factory=dict)
+    # The role each layer plays in a verdict: `veto` (can decide on its own),
+    # `scoring` (contributes to the composite), or `advisory` (reported, never
+    # decisive). Carried so an SDK consumer is not left to guess that four of
+    # the ten layer blocks — `sandboxResult`, the behavioural fingerprint,
+    # `telemetrySpan` and `policyVerification` — cannot move a decision, and
+    # neither can the session graph's `advisoryScore` sub-field; treating them
+    # as active defences overstates coverage. Note the session graph's signed
+    # `anomalyScore` is a
+    # different field and IS decisive: it is a term in the composite and
+    # escalates to review on its own at 50.
+    # Empty against an older server that does not send it.
+    layer_roles: JsonDict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: JsonDict) -> "GovernanceResult":
@@ -217,7 +229,18 @@ class GovernanceResult:
             audit_event=dict(data.get("auditEvent", {})),
             profile=dict(data.get("profile", {})),
             workspace_policy=dict(data.get("workspacePolicy", {})),
+            layer_roles=dict(data.get("layerRoles", {})),
         )
+
+    def is_advisory_layer(self, layer: str) -> bool:
+        """Whether `layer` is reported but cannot move a verdict.
+
+        A consumer building its own risk view should not sum advisory layers in
+        with the deciding ones. Unknown layers return False so a missing
+        `layerRoles` (older server) does not silently reclassify everything.
+        """
+        role = self.layer_roles.get(layer)
+        return isinstance(role, dict) and role.get("role") == "advisory"
 
     @property
     def allowed(self) -> bool:

@@ -2,7 +2,7 @@
  * Govern an MCP server's tools with IAGA Sentinel (TypeScript SDK).
  *
  *   npm i @modelcontextprotocol/sdk zod @iaga-sentinel/sdk
- *   IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
+ *   IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true ./target/release/iaga serve --seed-demo
  *   # register the agent (see README.md), then run with tsx.
  *
  * governMcpTool wraps each handler so every tools/call is inspected first.

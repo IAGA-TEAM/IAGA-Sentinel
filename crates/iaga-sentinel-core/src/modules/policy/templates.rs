@@ -61,6 +61,7 @@ fn strict_production() -> PolicyTemplate {
                     allowed_action_types: vec![ActionType::FileRead],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
             ],
             allowed_domains: vec![],
@@ -140,6 +141,7 @@ fn permissive_dev() -> PolicyTemplate {
                     ],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
             ],
             allowed_domains: vec![],
@@ -188,12 +190,14 @@ fn compliance_hipaa() -> PolicyTemplate {
                     allowed_action_types: vec![ActionType::FileRead],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "db.query".into(),
                     allowed_action_types: vec![ActionType::DbQuery],
                     max_decision: GovernanceDecision::Review,
                     requires_human_review: true,
+                    ..Default::default()
                 },
             ],
             allowed_domains: vec![],
@@ -264,12 +268,14 @@ fn compliance_soc2() -> PolicyTemplate {
                     allowed_action_types: vec![ActionType::FileRead],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "filesystem.write".into(),
                     allowed_action_types: vec![ActionType::FileWrite],
                     max_decision: GovernanceDecision::Review,
                     requires_human_review: true,
+                    ..Default::default()
                 },
             ],
             allowed_domains: vec![],
@@ -353,12 +359,14 @@ fn ml_pipeline() -> PolicyTemplate {
                     allowed_action_types: vec![ActionType::FileRead, ActionType::DbQuery],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
                 ToolPolicy {
                     tool_name: "model.inference".into(),
                     allowed_action_types: vec![ActionType::Http],
                     max_decision: GovernanceDecision::Allow,
                     requires_human_review: false,
+                    ..Default::default()
                 },
             ],
             allowed_domains: vec![],

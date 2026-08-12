@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-pytest.importorskip("crewai")
+pytest.importorskip("crewai.tools")
 
 from crewai.tools import BaseTool  # noqa: E402
 

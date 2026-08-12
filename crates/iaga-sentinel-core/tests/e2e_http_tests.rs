@@ -853,6 +853,12 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
             "/v1/risk/feedback",
             serde_json::json!({ "feedback": "false_positive" }),
         ),
+        // Releasing or refusing a contained action is an operator decision, not
+        // something the governed agent may make about itself. These two became
+        // admin-only without a test; the id does not have to exist, because the
+        // scope guard runs before the lookup.
+        ("/v1/sandbox/no-such-id/approve", serde_json::json!({})),
+        ("/v1/sandbox/no-such-id/reject", serde_json::json!({})),
     ];
     for (path, body) in admin_post_endpoints {
         let resp = agent

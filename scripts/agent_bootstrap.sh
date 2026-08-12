@@ -57,10 +57,21 @@ policy "never_destroy_production_data" {
 
 // secret_ref() detects RAW credential material (AWS keys, PEM blocks), NOT
 // secretref:// references. See AGENTS.md: secret_ref vs secretref://.
+//
+// ORDER MATTERS: secret_ref() comes FIRST on purpose.
+// url_host() reads `destination` and only `destination`; on a payload naming its
+// target url/uri/endpoint/href/target/webhook it ERRORS, and an erroring `when`
+// on a block rule fires FAIL-CLOSED (reason `dictum-eval-error`). `and`
+// short-circuits, so testing for a credential first means an ordinary call with
+// no secret never reaches url_host() and is not refused for a rule it does not
+// violate. A payload that DOES carry a secret still evaluates url_host(), so an
+// alias there still fails closed -- the protection is unchanged, the false
+// refusal is gone. Host-check the other key names on the WORKSPACE policy
+// (destinationFields on the tool), which applies the allowlist to all of them.
 policy "no_secret_egress_off_allowlist" {
   when action.kind == "http"
-   and url_host(action.payload.destination) not in workspace.allowlist
    and secret_ref(action.payload)
+   and url_host(action.payload.destination) not in workspace.allowlist
   then block, reason="credentials must not leave approved hosts",
        evidence=action.payload.destination
 }
@@ -84,6 +95,11 @@ echo "> iaga policy lint / check"
 "$IAGA" policy check "$POLICY"
 
 # 4. Serve with the overlay on the shared DB.
+# Open mode makes every unauthenticated caller an implicit ADMIN while no
+# API key exists, and the server's own default bind host is 0.0.0.0 - so
+# without this the script publishes an admin API to the whole LAN. Every
+# probe below already talks to 127.0.0.1.
+export IAGA_SENTINEL_HOST=127.0.0.1
 export IAGA_SENTINEL_OPEN_MODE=true
 export DATABASE_URL="$DBURL"
 echo ""
