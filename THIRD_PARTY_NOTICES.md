@@ -1813,7 +1813,7 @@ SOFTWARE.
 ## MIT License
 
 Used by:
-- h2 0.4.13
+- h2 0.4.19
 
 ```
 Copyright (c) 2017 h2 authors
