@@ -33,6 +33,7 @@ const MAX_ENTRIES: usize = 1024;
 struct CachedKey {
     key_id: Option<String>,
     scope: KeyScope,
+    agent_id: Option<String>,
     inserted_at: Instant,
 }
 
@@ -74,7 +75,7 @@ impl AuthCache {
 
     /// Returns the cached identity/scope for a raw key that previously
     /// verified, or `None` (caller falls back to a real verification).
-    pub fn lookup(&self, raw_key: &str) -> Option<(Option<String>, KeyScope)> {
+    pub fn lookup(&self, raw_key: &str) -> Option<(Option<String>, KeyScope, Option<String>)> {
         if !self.enabled() {
             return None;
         }
@@ -83,11 +84,17 @@ impl AuthCache {
         if entry.inserted_at.elapsed() > self.ttl {
             return None;
         }
-        Some((entry.key_id.clone(), entry.scope))
+        Some((entry.key_id.clone(), entry.scope, entry.agent_id.clone()))
     }
 
     /// Remembers a successfully verified key. Evicts the oldest entry at cap.
-    pub fn insert(&self, raw_key: &str, key_id: Option<String>, scope: KeyScope) {
+    pub fn insert(
+        &self,
+        raw_key: &str,
+        key_id: Option<String>,
+        scope: KeyScope,
+        agent_id: Option<String>,
+    ) {
         if !self.enabled() {
             return;
         }
@@ -106,6 +113,7 @@ impl AuthCache {
             CachedKey {
                 key_id,
                 scope,
+                agent_id,
                 inserted_at: Instant::now(),
             },
         );
@@ -162,10 +170,16 @@ mod tests {
         let cache = AuthCache::new(Duration::from_secs(60));
         assert!(cache.lookup("iaga_abc").is_none());
 
-        cache.insert("iaga_abc", Some("key-1".into()), KeyScope::Agent);
-        let (id, scope) = cache.lookup("iaga_abc").expect("cached");
+        cache.insert(
+            "iaga_abc",
+            Some("key-1".into()),
+            KeyScope::Agent,
+            Some("agent-1".into()),
+        );
+        let (id, scope, agent_id) = cache.lookup("iaga_abc").expect("cached");
         assert_eq!(id.as_deref(), Some("key-1"));
         assert_eq!(scope, KeyScope::Agent);
+        assert_eq!(agent_id.as_deref(), Some("agent-1"));
 
         cache.invalidate_key_id("key-1");
         assert!(cache.lookup("iaga_abc").is_none());
@@ -174,8 +188,8 @@ mod tests {
     #[test]
     fn remove_drops_single_entry() {
         let cache = AuthCache::new(Duration::from_secs(60));
-        cache.insert("iaga_a", None, KeyScope::Admin);
-        cache.insert("iaga_b", None, KeyScope::Admin);
+        cache.insert("iaga_a", None, KeyScope::Admin, None);
+        cache.insert("iaga_b", None, KeyScope::Admin, None);
         cache.remove("iaga_a");
         assert!(cache.lookup("iaga_a").is_none());
         assert!(cache.lookup("iaga_b").is_some());
@@ -184,7 +198,7 @@ mod tests {
     #[test]
     fn zero_ttl_disables_everything() {
         let cache = AuthCache::new(Duration::ZERO);
-        cache.insert("iaga_abc", Some("key-1".into()), KeyScope::Admin);
+        cache.insert("iaga_abc", Some("key-1".into()), KeyScope::Admin, None);
         assert!(cache.lookup("iaga_abc").is_none());
         cache.set_keys_exist(true);
         assert!(cache.keys_exist().is_none());
@@ -206,7 +220,7 @@ mod tests {
     fn cap_evicts_oldest_entry() {
         let cache = AuthCache::new(Duration::from_secs(60));
         for i in 0..MAX_ENTRIES + 1 {
-            cache.insert(&format!("iaga_{i}"), None, KeyScope::Admin);
+            cache.insert(&format!("iaga_{i}"), None, KeyScope::Admin, None);
         }
         let entries = cache.entries.read().unwrap();
         assert!(entries.len() <= MAX_ENTRIES);

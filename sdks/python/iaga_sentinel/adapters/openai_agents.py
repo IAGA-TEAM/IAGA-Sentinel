@@ -4,13 +4,13 @@ Two hooks (use either or both):
 
   * `governed_tool(...)` wraps a plain function before `@function_tool`, so the
     tool call is inspected before it runs (block/review -> PermissionError).
-  * `iaga_tool_guardrail(...)` returns a tool-input guardrail callable
-    `(ctx, agent, tool_name, tool_input)` that trips when IAGA blocks/reviews;
-    attach it to a function tool / agent. It does not raise, so the SDK turns the
-    tripwire into its own `ToolGuardrailTripwireTriggered`.
+  * `iaga_tool_guardrail(...)` returns a tool-input guardrail callable taking a
+    single guardrail-data argument; attach it to a function tool / agent. It does
+    not raise: allow returns `ToolGuardrailFunctionOutput.allow()`, block/review
+    returns `reject_content`, so the tool does not run and the model is told why.
 
 Does not import `agents`; the guardrail return value uses the SDK's
-`GuardrailFunctionOutput` when available, else a duck-typed fallback.
+`ToolGuardrailFunctionOutput` when available, else a duck-typed fallback.
 
 See plug-ins/openai-agents-adapter/ for a runnable example.
 """

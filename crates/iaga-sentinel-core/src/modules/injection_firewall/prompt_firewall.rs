@@ -3,8 +3,9 @@
 //! 3-stage pipeline:
 //!   Stage 1: Signature scan (<1ms), 25+ known injection patterns
 //!   Stage 2: Structural analysis (<5ms), entropy, role confusion, encoding tricks
-//!   Stage 3: Semantic gating (<200ms), only triggered if stages 1-2 flag risk
+//!   Stage 3: Semantic heuristics (<200ms)
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -106,6 +107,69 @@ fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Normalize the compatibility characters attackers use most often without a
+/// Unicode-normalization dependency. Full-width ASCII is losslessly mapped;
+/// mixed Latin/Cyrillic tokens are handled separately below.
+fn normalize_compat_ascii(text: &str) -> Cow<'_, str> {
+    if !text
+        .chars()
+        .any(|c| matches!(c, '\u{3000}' | '\u{FF01}'..='\u{FF5E}'))
+    {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|c| match c {
+                '\u{3000}' => ' ',
+                '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+                _ => c,
+            })
+            .collect(),
+    )
+}
+
+fn is_cyrillic_confusable(c: char) -> bool {
+    matches!(
+        c,
+        'а' | 'е'
+            | 'і'
+            | 'о'
+            | 'р'
+            | 'с'
+            | 'у'
+            | 'х'
+            | 'А'
+            | 'В'
+            | 'Е'
+            | 'І'
+            | 'К'
+            | 'М'
+            | 'Н'
+            | 'О'
+            | 'Р'
+            | 'С'
+            | 'Т'
+            | 'Х'
+    )
+}
+
+fn contains_mixed_script_token(text: &str) -> bool {
+    let (mut latin, mut cyrillic) = (false, false);
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            latin |= c.is_ascii_alphabetic();
+            cyrillic |= is_cyrillic_confusable(c);
+            if latin && cyrillic {
+                return true;
+            }
+        } else {
+            latin = false;
+            cyrillic = false;
+        }
+    }
+    false
+}
+
 // ── Stage 1: Signature Scan ──
 
 struct InjectionSignature {
@@ -194,7 +258,7 @@ fn signatures() -> Vec<InjectionSignature> {
         },
         InjectionSignature {
             name: "jailbreak_dan",
-            pattern: r"(?i)(DAN|do\s+anything\s+now|developer\s+mode|god\s+mode|sudo\s+mode)",
+            pattern: r"(?i)(\bDAN\b|\bdo\s+anything\s+now\b|\bdeveloper\s+mode\b|\bgod\s+mode\b|\bsudo\s+mode\b)",
             severity: "critical",
             score: 95,
             category: "role_manipulation",
@@ -209,7 +273,7 @@ fn signatures() -> Vec<InjectionSignature> {
         // Data exfiltration
         InjectionSignature {
             name: "exfil_curl",
-            pattern: r"(?i)curl\s+.*\|\s*(sh|bash)",
+            pattern: r"(?is)(curl|wget)\s+.*\|\s*(sh|bash)\b",
             severity: "critical",
             score: 95,
             category: "exfiltration",
@@ -251,13 +315,6 @@ fn signatures() -> Vec<InjectionSignature> {
             category: "obfuscation",
         },
         InjectionSignature {
-            name: "homoglyph_attack",
-            pattern: r"[аеіорсуАВЕІКМНОРСТХ]",
-            severity: "high",
-            score: 75,
-            category: "obfuscation",
-        },
-        InjectionSignature {
             name: "zero_width_chars",
             pattern: r"[\u{200B}\u{200C}\u{200D}\u{FEFF}\u{2060}]",
             severity: "high",
@@ -274,14 +331,28 @@ fn signatures() -> Vec<InjectionSignature> {
         },
         InjectionSignature {
             name: "html_injection",
-            pattern: r"<\s*(script|iframe|img|object|embed|svg|link)\s",
+            pattern: r"(?i)<\s*(script|iframe|object|embed)(?:\s|>)",
             severity: "high",
             score: 85,
             category: "indirect_injection",
         },
         InjectionSignature {
+            name: "html_event_handler",
+            pattern: r"(?is)<[^>]+\bon(?:error|load|click|focus|mouseover)\s*=",
+            severity: "high",
+            score: 85,
+            category: "indirect_injection",
+        },
+        InjectionSignature {
+            name: "html_script_url",
+            pattern: r#"(?is)<[^>]+(?:href|src)\s*=\s*["']?\s*javascript:"#,
+            severity: "critical",
+            score: 90,
+            category: "indirect_injection",
+        },
+        InjectionSignature {
             name: "data_uri",
-            pattern: r"data:\w+/\w+;base64,",
+            pattern: r"(?i)data:[a-z0-9.+-]+/[a-z0-9.+-]+;base64,",
             severity: "high",
             score: 75,
             category: "indirect_injection",
@@ -375,6 +446,21 @@ fn run_stage2(text: &str) -> StageResult {
     let start = now_us();
     let mut matches = Vec::new();
     let mut max_score: u32 = 0;
+    let char_count = text.chars().count();
+
+    // ponytail: this catches the practical mixed-script bypass without
+    // pretending to implement the full Unicode confusables specification.
+    // Replace with UTS #39 skeletons if non-Latin identifiers become normal
+    // product input.
+    if contains_mixed_script_token(text) {
+        matches.push(PatternMatch {
+            pattern_name: "homoglyph_attack".into(),
+            severity: "high".into(),
+            matched_text: "mixed Latin/Cyrillic token".into(),
+            category: "obfuscation".into(),
+        });
+        max_score = 75;
+    }
 
     // High entropy (potential obfuscation)
     let entropy = shannon_entropy(text);
@@ -435,9 +521,9 @@ fn run_stage2(text: &str) -> StageResult {
         .chars()
         .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())
         .count();
-    let total = text.len().max(1);
+    let total = char_count.max(1);
     let special_ratio = special_count as f64 / total as f64;
-    if special_ratio > 0.4 && text.len() > 50 {
+    if special_ratio > 0.4 && char_count > 50 {
         let score = 55;
         matches.push(PatternMatch {
             pattern_name: "special_char_heavy".into(),
@@ -473,12 +559,12 @@ fn run_stage2(text: &str) -> StageResult {
     }
 
     // Length anomaly (very long payloads in tool calls are suspicious)
-    if text.len() > 5000 {
+    if char_count > 5000 {
         let score = 35;
         matches.push(PatternMatch {
             pattern_name: "length_anomaly".into(),
             severity: "low".into(),
-            matched_text: format!("{} chars", text.len()),
+            matched_text: format!("{} chars", char_count),
             category: "structural".into(),
         });
         max_score = max_score.max(score);
@@ -531,37 +617,37 @@ fn run_stage3(text: &str) -> StageResult {
         let defs: Vec<(&str, &str, u32, &str)> = vec![
             (
                 "data_theft",
-                r"(?i)(steal|exfiltrate|extract|dump|harvest|scrape)\s+.*(data|credentials|secrets|tokens|keys|passwords|information)",
+                r"(?is)(steal|exfiltrate|extract|dump|harvest|scrape)\s+.*(data|credentials|secrets|tokens|keys|passwords|information)",
                 90,
                 "critical",
             ),
             (
                 "system_compromise",
-                r"(?i)(compromise|hack|exploit|penetrate|attack|breach)\s+.*(system|server|network|database|infrastructure)",
+                r"(?is)(compromise|hack|exploit|penetrate|attack|breach)\s+.*(system|server|network|database|infrastructure)",
                 90,
                 "critical",
             ),
             (
                 "persistence",
-                r"(?i)(install|create|add|set\s+up)\s+.*(backdoor|trojan|rootkit|persistent\s+access|reverse\s+shell|c2|beacon)",
+                r"(?is)(install|create|add|set\s+up)\s+.*(backdoor|trojan|rootkit|persistent\s+access|reverse\s+shell|c2|beacon)",
                 95,
                 "critical",
             ),
             (
                 "reconnaissance",
-                r"(?i)(enumerate|scan|discover|map|fingerprint)\s+.*(network|ports|services|users|hosts|infrastructure)",
+                r"(?is)(enumerate|scan|discover|map|fingerprint)\s+.*(network|ports|services|users|hosts|infrastructure)",
                 60,
                 "medium",
             ),
             (
                 "social_engineering",
-                r"(?i)(phishing|impersonate|social\s+engineer|deceive|manipulate)\s+.*(users?|employees?|targets?|victims?)",
+                r"(?is)(phishing|impersonate|social\s+engineer|deceive|manipulate)\s+.*(users?|employees?|targets?|victims?)",
                 85,
                 "high",
             ),
             (
                 "denial_of_service",
-                r"(?i)(dos|ddos|flood|overwhelm|crash|exhaust)\s+.*(server|service|api|endpoint|resource)",
+                r"(?is)(dos|ddos|flood|overwhelm|crash|exhaust)\s+.*(server|service|api|endpoint|resource)",
                 80,
                 "high",
             ),
@@ -578,8 +664,50 @@ fn run_stage3(text: &str) -> StageResult {
             .collect()
     });
 
+    // ponytail: these are intent heuristics, not an NLP classifier. Restrict
+    // them to directive-shaped clauses so incident reports and defensive
+    // documentation do not become signed accusations. Expand the short prefix
+    // list only when a measured phrasing needs it.
+    fn is_directive_clause(text: &str, verb_start: usize) -> bool {
+        let prefix = text[..verb_start]
+            .rsplit(['.', '!', '?', ';', ':', '\n'])
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches(['"', '\'', '\\', '{', '[', ','])
+            .trim()
+            .to_ascii_lowercase();
+        matches!(
+            prefix.as_str(),
+            "" | "please"
+                | "then"
+                | "now"
+                | "please then"
+                | "can you"
+                | "could you"
+                | "would you"
+                | "will you"
+                | "you should"
+                | "you must"
+                | "we should"
+                | "we must"
+                | "i want you to"
+                | "i need you to"
+                | "i will"
+                | "let's"
+                | "help me"
+                | "teach me to"
+                | "how do i"
+                | "how can i"
+        )
+    }
+
     for sp in SEMANTIC_PATTERNS.iter() {
-        if let Some(m) = sp.regex.find(text) {
+        if let Some(m) = sp
+            .regex
+            .find_iter(text)
+            .find(|m| is_directive_clause(text, m.start()))
+        {
             let matched = truncate_on_char_boundary(m.as_str(), 100);
             matches.push(PatternMatch {
                 pattern_name: sp.name.to_string(),
@@ -652,36 +780,31 @@ fn run_stage3(text: &str) -> StageResult {
 // ── Main Firewall ──
 
 pub fn scan_prompt(text: &str) -> FirewallResult {
-    let mut stages_run: u32;
+    let normalized = normalize_compat_ascii(text);
     let mut stage_results = Vec::new();
 
     // Stage 1: always runs
-    let s1 = run_stage1(text);
+    let s1 = run_stage1(&normalized);
     let s1_triggered = s1.triggered;
     let s1_score = s1.score;
     stage_results.push(s1);
 
     // Stage 2: always runs (cheap structural check)
-    stages_run = 2;
     let s2 = run_stage2(text);
     let s2_triggered = s2.triggered;
     let s2_score = s2.score;
     stage_results.push(s2);
 
-    // Stage 3: only if stages 1 or 2 flagged something
-    let s3_score = if s1_triggered || s2_triggered {
-        stages_run = 3;
-        let s3 = run_stage3(text);
-        let score = s3.score;
-        stage_results.push(s3);
-        score
-    } else {
-        0
-    };
+    // Stage 3 must run independently: using stages 1-2 as a gate made every
+    // semantic-only attack invisible by construction.
+    let s3 = run_stage3(&normalized);
+    let s3_triggered = s3.triggered;
+    let s3_score = s3.score;
+    stage_results.push(s3);
 
     // Composite score: max of all stages with slight boost for multi-stage hits
     let mut risk_score = s1_score.max(s2_score).max(s3_score);
-    let stages_triggered = [s1_triggered, s2_triggered, s3_score > 0]
+    let stages_triggered = [s1_triggered, s2_triggered, s3_triggered]
         .iter()
         .filter(|&&x| x)
         .count();
@@ -695,12 +818,12 @@ pub fn scan_prompt(text: &str) -> FirewallResult {
     let blocked = risk_score >= 75;
 
     let summary = if blocked {
-        let categories: Vec<String> = stage_results
+        let mut categories: Vec<String> = stage_results
             .iter()
             .flat_map(|s| s.matches.iter().map(|m| m.category.clone()))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
             .collect();
+        categories.sort();
+        categories.dedup();
         format!(
             "BLOCKED: injection detected (score={}, categories: {})",
             risk_score,
@@ -733,7 +856,7 @@ pub fn scan_prompt(text: &str) -> FirewallResult {
     FirewallResult {
         blocked,
         risk_score,
-        stages_run,
+        stages_run: 3,
         stage_results,
         summary,
         timestamp: now_ms(),

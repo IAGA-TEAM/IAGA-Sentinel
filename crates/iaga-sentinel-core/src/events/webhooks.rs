@@ -132,9 +132,7 @@ impl WebhookManager {
         let before = hooks.len();
         hooks.retain(|h| h.id != id);
         if hooks.len() == before {
-            return Err(SentinelError::InvalidRequest(format!(
-                "Webhook not found: {id}"
-            )));
+            return Err(SentinelError::NotFound(format!("Webhook not found: {id}")));
         }
         Ok(())
     }
@@ -171,9 +169,10 @@ impl WebhookManager {
 
     /// Retry a dead-letter entry. Returns the delivery result.
     pub async fn retry_dlq_entry(&self, entry_id: &str) -> Result<(), SentinelError> {
-        let entry = self.dlq.take(entry_id).await.ok_or_else(|| {
-            SentinelError::InvalidRequest(format!("DLQ entry not found: {entry_id}"))
-        })?;
+        let entry =
+            self.dlq.take(entry_id).await.ok_or_else(|| {
+                SentinelError::NotFound(format!("DLQ entry not found: {entry_id}"))
+            })?;
 
         // Find the webhook config
         let hooks = self.hooks.read().await;

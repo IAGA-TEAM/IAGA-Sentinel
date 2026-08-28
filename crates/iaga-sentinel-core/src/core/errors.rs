@@ -25,6 +25,17 @@ pub enum SentinelError {
     #[error("This endpoint requires an admin-scoped API key")]
     AdminScopeRequired,
 
+    #[error("Agent-scoped API key is not bound to an agent; rotate it with an explicit agentId")]
+    AgentKeyUnbound,
+
+    #[error("Agent-scoped API key is bound to '{expected}', but the request asserted '{claimed}'")]
+    AgentScopeMismatch { expected: String, claimed: String },
+    /// Neither an admin key nor a capability token granting `{0}` for this
+    /// agent. Distinct from `AdminScopeRequired` so a caller can tell "you need
+    /// to be an operator" from "your token does not carry this capability".
+    #[error("This endpoint requires an admin-scoped API key or a capability token granting '{0}'")]
+    CapabilityRequired(String),
+
     /// The request asserted a workspace that is not the one its agent profile
     /// belongs to. Scope is derived server-side from the profile; a contradicting
     /// client value is refused rather than silently honoured, which would have
@@ -43,6 +54,9 @@ pub enum SentinelError {
 
     #[error("Review not found: {0}")]
     ReviewNotFound(String),
+
+    #[error("{0}")]
+    NotFound(String),
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -73,11 +87,17 @@ impl IntoResponse for SentinelError {
             SentinelError::AuthRequired => (StatusCode::UNAUTHORIZED, "auth_required"),
             SentinelError::InvalidApiKey => (StatusCode::UNAUTHORIZED, "invalid_api_key"),
             SentinelError::AdminScopeRequired => (StatusCode::FORBIDDEN, "admin_scope_required"),
+            SentinelError::AgentKeyUnbound => (StatusCode::FORBIDDEN, "agent_key_unbound"),
+            SentinelError::AgentScopeMismatch { .. } => {
+                (StatusCode::FORBIDDEN, "agent_scope_mismatch")
+            }
+            SentinelError::CapabilityRequired(_) => (StatusCode::FORBIDDEN, "capability_required"),
             SentinelError::WorkspaceScopeMismatch { .. } => {
                 (StatusCode::FORBIDDEN, "scope_mismatch")
             }
             SentinelError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
             SentinelError::ReviewNotFound(_) => (StatusCode::NOT_FOUND, "review_not_found"),
+            SentinelError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             SentinelError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             SentinelError::Config(_) => (StatusCode::INTERNAL_SERVER_ERROR, "config_error"),
             SentinelError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "io_error"),

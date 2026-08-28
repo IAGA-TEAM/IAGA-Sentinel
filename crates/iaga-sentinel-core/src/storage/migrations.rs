@@ -29,23 +29,34 @@ pub async fn run_sqlite_migrations(pool: &sqlx::SqlitePool) -> Result<(), Sentin
         ("agent_profiles", "tenant_id", "TEXT DEFAULT NULL"),
         ("workspace_policies", "tenant_id", "TEXT DEFAULT NULL"),
         ("api_keys", "tenant_id", "TEXT DEFAULT NULL"),
-        // 1.5 cost-control columns (idempotent backfill for older community DBs)
-        ("audit_events", "usage_json", "TEXT DEFAULT NULL"),
-        ("audit_events", "cost_usd", "REAL DEFAULT NULL"),
-        ("audit_events", "savings_usd", "REAL DEFAULT NULL"),
-        ("audit_events", "total_tokens", "INTEGER DEFAULT NULL"),
-        ("audit_events", "cache_hit", "INTEGER DEFAULT NULL"),
-        ("audit_events", "provider", "TEXT DEFAULT NULL"),
-        ("audit_events", "model", "TEXT DEFAULT NULL"),
-        // 1.5.2 API key scope (idempotent backfill for older community DBs)
-        ("api_keys", "scope", "TEXT NOT NULL DEFAULT 'admin'"),
-        // 2.0.1 audit: persisted tool_trust (idempotent backfill for older
-        // community DBs). 0.7 is the value those rows were already being scored
-        // with while the column did not exist, so backfilling changes no verdict.
-        ("agent_profiles", "tool_trust", "REAL NOT NULL DEFAULT 0.7"),
+        // Every entry above originates in `0001_initial.sql` and is reachable:
+        // a database created before those columns existed already has 0001's row
+        // in `_sqlx_migrations`, so sqlx will not re-run it and
+        // `CREATE TABLE IF NOT EXISTS` is a no-op. This loop is the only path
+        // that can add them.
+        //
+        // Nine more entries used to follow, backfilling the 1.5 cost columns,
+        // the 1.5.2 `api_keys.scope` and the 2.0.1 `agent_profiles.tool_trust`.
+        // All nine were unreachable by construction: `SQLITE_MIGRATOR.run` above
+        // completes with `?` BEFORE this loop starts, so any database that gets
+        // here has 0004/0005/0006 applied and `ensure_sqlite_column`'s
+        // `pragma_table_info` probe always found the column and skipped.
+        //
+        // They could not even rescue the case they were written for. A legacy DB
+        // that already had the cost columns but no `_sqlx_migrations` row for
+        // 0004 makes sqlx run 0004's plain `ALTER TABLE ... ADD COLUMN` (SQLite
+        // has no `IF NOT EXISTS` there), which fails with "duplicate column
+        // name" and returns Err before this loop is reached.
     ] {
         ensure_sqlite_column(pool, table, column, definition).await?;
     }
+
+    warn_about_unbound_agent_keys(
+        sqlx::query_scalar::<_, i64>(UNBOUND_AGENT_KEYS)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0),
+    );
 
     Ok(())
 }
@@ -87,23 +98,49 @@ pub async fn run_postgres_migrations(pool: &sqlx::PgPool) -> Result<(), Sentinel
         "ALTER TABLE IF EXISTS agent_profiles ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE",
         "ALTER TABLE IF EXISTS workspace_policies ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE",
         "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS tenant_id TEXT REFERENCES tenants(tenant_id) ON DELETE CASCADE",
-        // 1.5 cost-control columns (idempotent backfill for older community DBs)
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS usage_json TEXT DEFAULT NULL",
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION DEFAULT NULL",
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS savings_usd DOUBLE PRECISION DEFAULT NULL",
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS total_tokens BIGINT DEFAULT NULL",
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS cache_hit BOOLEAN DEFAULT NULL",
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS provider TEXT DEFAULT NULL",
-        "ALTER TABLE IF EXISTS audit_events ADD COLUMN IF NOT EXISTS model TEXT DEFAULT NULL",
-        // 1.5.2 API key scope (idempotent backfill for older community DBs)
-        "ALTER TABLE IF EXISTS api_keys ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'admin'",
-        // 2.0.1 audit: persisted tool_trust (idempotent backfill for older
-        // community DBs). 0.7 is the value those rows were already being scored
-        // with while the column did not exist, so backfilling changes no verdict.
-        "ALTER TABLE IF EXISTS agent_profiles ADD COLUMN IF NOT EXISTS tool_trust DOUBLE PRECISION NOT NULL DEFAULT 0.7",
+        // The nine cost / scope / tool_trust backfills that used to follow
+        // are gone: `POSTGRES_MIGRATOR.run` above completes with `?` before
+        // this loop, so 0004/0005/0006 are always applied by the time it
+        // runs, and `ADD COLUMN IF NOT EXISTS` made each one a server-side
+        // no-op. The seven above stay -- they originate in 0001, which sqlx
+        // will not re-run on an existing database.
     ] {
         sqlx::query(ddl).execute(pool).await?;
     }
 
+    warn_about_unbound_agent_keys(
+        sqlx::query_scalar::<_, i64>(UNBOUND_AGENT_KEYS)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0),
+    );
+
     Ok(())
+}
+
+/// Agent-scoped keys that `0009` left with no identity binding.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+const UNBOUND_AGENT_KEYS: &str =
+    "SELECT COUNT(*) FROM api_keys WHERE scope = 'agent' AND agent_id IS NULL";
+
+/// Say out loud what `0009` just did to the keys already in this database.
+///
+/// The schema change is additive; the authorization change is not. Every
+/// agent-scoped key minted before this migration has a null binding and starts
+/// answering `403 agent_key_unbound`, which is deliberate and fail-closed — but
+/// the product knew the exact count at migration time and said nothing at the
+/// default log level, so the first signal an operator got was a 403 in a
+/// caller's face. Worse for anything that fails OPEN on an unexpected status:
+/// the Claude Code hook's default turns that 403 into `allow`, so an upgrade
+/// disarms it silently. One line, only when the count is nonzero.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn warn_about_unbound_agent_keys(count: i64) {
+    if count > 0 {
+        tracing::warn!(
+            unbound_agent_keys = count,
+            "migration 0009: {count} agent-scoped API key(s) predate identity binding and now \
+             fail closed with 403 agent_key_unbound. Rotate them: \
+             `iaga gen-key --scope agent --agent-id <id>`, then delete the old keys."
+        );
+    }
 }

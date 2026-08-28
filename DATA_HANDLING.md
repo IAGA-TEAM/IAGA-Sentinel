@@ -19,7 +19,11 @@ environment variable, that is called out explicitly.
   no managed IAGA backend.
 - Nothing calls home. The software sends no telemetry, analytics, or update checks to IAGA.
 - Verification is fully offline: `iaga-verify` reads an exported chain and checks signatures
-  with no database, no server, and no network.
+  with no database, no server, and no network. Pass `--key <hex>` with a key you recorded out of
+  band; without it the verifier trusts the key embedded in the file, which establishes that the
+  chain is internally consistent but not who signed it.
+- Logs carry no credentials: the boot line redacts the `DATABASE_URL` password (2.1.0) and the
+  bootstrap API key is never logged.
 
 ## What a signed receipt contains
 
@@ -116,8 +120,18 @@ All state is stored by the operator, in a backend the operator chooses:
 
 There is no managed IAGA backend and no cloud component. The tables created hold audit
 events, the human-review queue, agent profiles and workspace policies, API key hashes (the
-hash, not the raw key), non-human-identity records, session graphs, taint sessions,
-behavioral fingerprints, rate-limit configuration, and the signed receipts.
+hash, not the raw key), non-human-identity records, capability tokens, session graphs, taint
+sessions, behavioral fingerprints, rate-limit configuration, and the signed receipts.
+
+`capability_tokens` (migration `0008`, both backends) stores one row per issued capability
+token: its id, the single `agentId` it is bound to, the capabilities it grants, issue and
+expiry timestamps, whether it is still valid, and its HMAC signature. It is a credential, so
+treat a database dump as containing credentials — though the HMAC is symmetric and derived
+from the agent's own NHI secret, so a row alone does not let a third party mint or verify one.
+Before 2.1.0 these lived in a process-global map and were forgotten at restart; they are
+persisted now because revoking one has to be durable and fleet-wide. `0009` adds
+`api_keys.agent_id`, the identity an `agent`-scoped key is allowed to assert — an agent id,
+not personal data, and null for every `admin` key.
 
 `agent_profiles.tool_trust` (migration `0006`, both backends) stores the per-agent trust
 weight the risk scorer reads, defaulting to `0.7`. It is operator configuration, not agent
@@ -219,7 +233,7 @@ just early information.
 | Variable | Default | Effect on data |
 |----------|---------|----------------|
 | `IAGA_SENTINEL_RECEIPT_CAPTURE` | off | When `1`/`true`/`yes`, stores raw request snapshots, policy traces, and tokenized-input digests in receipts. |
-| `DATABASE_URL` | `sqlite:iaga_sentinel.db?mode=rwc` | Where all state is stored. `postgres://` requires the `postgres` feature. |
+| `DATABASE_URL` | `sqlite:iaga_sentinel.db?mode=rwc` | Where all state is stored. `postgres://` requires the `postgres` feature — which the shipped `Dockerfile` does **not** enable, so a stock image exits 1 on a `postgres://` URL. Since 2.1.0 the password is redacted (`scheme://user:***@host`) before the boot log line; through 2.0.2 it was written verbatim to stdout on every start. |
 | `IAGA_SENTINEL_SIGNER_KEY_PATH` | `~/.iaga-sentinel/keys/receipt_signer.ed25519` | Path to the Ed25519 receipt signing key. Auto-generated on first use if absent. |
 | `IAGA_SENTINEL_ENV_DENYLIST` | unset | Path to a TOML file (`deny = [...]`) that extends the 24-variable sensitive-env denylist scrubbed from governed child processes (1.3.1). |
 | `IAGA_SENTINEL_NHI_MASTER_SEED` | random per process | Seed for non-human-identity derivation. Set it for stable identities across restarts. |

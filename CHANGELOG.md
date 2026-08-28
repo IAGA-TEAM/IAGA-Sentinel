@@ -15,6 +15,575 @@ early-access list.
 
 ---
 
+## [2.1.0], 2026-08-28 — Evidence That Says What Happened
+
+An audit of `2.0.2` across the release and real user paths, plus an adversarial refutation pass. The
+theme is the one that matters most for an evidence product: **four separate ways the record could
+be wrong**, either by asserting something that did not happen or by being silently unavailable to
+the people entitled to it.
+
+The heaviest item is not a bypass. It is that a payment amount of `10.50`, sent to a public host,
+produced a **signed receipt carrying `EXFILTRATION DETECTED`** — because the internal-address check
+matched the substring `"10."` anywhere in the serialized payload, including the body. A signed
+false accusation is worse than a missed detection, and it went unnoticed because nothing tested it.
+
+Capability tokens also stop being decorative. They were minted, signed, stored and published
+through a documented endpoint and an SDK method in both languages, and they authorized nothing:
+the signature was never verified, the tokens lived in a process-global map that a restart emptied,
+`revoke_token` had no route, and the issuing route had no admin guard.
+
+**Compatibility.** The signed receipt **wire format is unchanged** and existing chains verify
+byte-for-byte. Governance verdicts on `/v1/inspect` are **identical to 2.0.2** across the `scenarios`
+section of the 342-case characterization corpus — 48 of those cases; the other 294 exercise
+`/v1/response/scan` (259), the CLI (17) and assorted surfaces (18). Measured, not asserted, by
+replaying the corpus against a `2.0.2` binary built from `b444886` and against this one, in the
+same hour, and diffing every field. Zero differences in decision, risk score, adaptive score or
+receipt body **on those 48**. The corpus as a whole is not unchanged: see item 4.
+
+**What a consumer can observe changing**, in rough order of how much it matters:
+
+**Agent-scoped API keys now name exactly one agent.** Create one with
+`iaga gen-key --scope agent --agent-id <id>` or the `agentId` field on
+`POST /v1/auth/keys`. The server rejects an attempt to use it as another identity with
+`403 agent_scope_mismatch`; an agent-scoped key created before this migration has no binding and
+fails closed with `403 agent_key_unbound` until it is rotated. Admin and open-mode callers remain
+cross-agent by design. The same check covers inspect, response scanning, NHI
+attest/challenge/verify and capability-token self reads; the demo adapter, which submits several
+seeded identities in one request, is now admin-only.
+
+1. **Reads that used to answer `200` to an agent-scoped key now answer `403`.** The write halves of
+   the governance surface were closed in #14/#18; the read halves were never reviewed. Every route
+   was enumerated against its guard rather than sampled — 83 route/method pairs at `b444886`, of
+   which 53 carried no guard at all. This release ends at 85 pairs (the new
+   `GET /v1/nhi/tokens` and `DELETE /v1/nhi/tokens/{tokenId}`) with 29 not identity-guarded
+   (24 open, plus 5 that accept only the key's own bound `agentId`), 52 admin-only and 4 behind a
+   capability token. Now admin-only: `GET /v1/analytics/agents`, `/v1/reviews`, `/v1/profiles`,
+   `/v1/workspaces[/{id}]`, `/v1/workspaces/{id}/rules`, `/v1/policy/verify/{id}`,
+   `/v1/nhi/identities`, `/v1/sessions[/{id}/metrics]`, `/v1/fingerprint`, `/v1/sandbox/pending`,
+   `/v1/cost/by-agent`, `/v1/telemetry/spans|metrics|export`, and the `/v1/events/stream` SSE
+   firehose. The four per-agent reads — `GET /v1/profiles/{id}`, `/v1/analytics/agents/{id}`,
+   `/v1/fingerprint/{id}` and `/v1/rate-limit/status/{id}` — answer `capability_required` instead:
+   an agent reaches its **own** record with a `read:self` token (item 3).
+
+   The telemetry trio is the one worth naming. `otel_emitter` records `agent.id`, `tool.name`,
+   `governance.decision` and `risk.score` for every governed action and keeps 10 000 of them
+   newest-first, so `GET /v1/telemetry/spans` reconstructed by polling exactly the cross-tenant
+   firehose the new SSE guard refuses. Closing the stream and leaving that open would have been
+   shutting one door while the next one stayed open on the same data.
+
+   **The operator console is unaffected** — it sends one token for every call and already needed
+   admin for `/v1/audit` and `/v1/receipts`.
+2. **`POST /v1/reviews/{id}` requires an admin key.** An agent-scoped key could resolve the review
+   raised against its own action. It never released the execution — nothing re-reads the status —
+   but it published `ReviewResolved`, and the console then showed the entry as settled by a human.
+3. **`POST /v1/nhi/tokens` requires an admin key**, and there is a new
+   `DELETE /v1/nhi/tokens/{tokenId}`. Any agent-scoped key could previously mint
+   `capabilities: ["*"]` for any agent.
+4. **A connection string with an embedded password is now detected as a credential.** On
+   `/v1/response/scan`, measured against a 2.0.2 binary across the corpus: ten
+   `mongodb+srv://root:s3cr3t@cluster0.mongodb.net/db` cases, nine of which passed 2.0.2 completely
+   (`allow`, risk `0`) and one of which reached `review`/55 through the sensitive-pattern scan. All
+   ten are now `block`/80. `postgres://...` was already blocked, but only by accident — its hostname
+   ended in `.internal` — and is now blocked because it carries a credential.
+
+   **`/v1/inspect` moves too, and the corpus did not show it.** The detector lives in
+   `has_secret_content`, which `classify_source` applies to every action type, so it is not
+   response-scoped. Measured directly against a 2.0.2 binary in the same hour: an `http` action
+   whose body carries `mongodb+srv://root:s3cr3t@…` goes from risk `70` to `76` and gains a
+   `taint tracking: … secret → sink: network_egress | BLOCKED | EXFILTRATION DETECTED` reason; the
+   `10.50` payment case goes the other way, `76` to `70`, losing the false exfiltration finding.
+   Both keep `block` in that measurement only because the destination was outside the workspace
+   allowlist, which decided them independently. Items 6 and 7 below move `/v1/inspect` as well.
+   **The honest statement of compatibility is item 0: zero differences on the 48 `/v1/inspect`
+   cases of the 342-case corpus.** Across the whole corpus there are ten verdict changes, all of
+   them the `/v1/response/scan` cases named above. That corpus contains no `maxDecision: block` policy, no credential-bearing URL on the
+   inspect path and no bare `10.` in a body, so it could not have shown any of this. If you depend
+   on exact risk scores, re-baseline rather than trusting the corpus number.
+5. **`/v1/response/scan` stops blocking benign responses.** After any `file_read` in a session,
+   every later scan in that session returned `block` at risk 80 regardless of content, so
+   "read a file, then summarise it" was broken from the second step on. Each false block also wrote
+   a signed audit event.
+6. **`maxDecision: block` now denies.** It was inert, so a tool pinned to it was governed exactly as
+   if it had said `allow`. Any workspace policy already using it will see verdicts change — which
+   is the point, and is still a change in what the product blocks.
+7. **Workspace rule bounds were renamed** `minRiskScore`/`maxRiskScore` →
+   `minAdaptiveScore`/`maxAdaptiveScore`. Stored rules keep working (serde aliases). The shipped
+   `soc2-shell-hours` rule was firing almost unconditionally and downgrading Review to Allow during
+   business hours; it is now bounded at the adaptive review threshold.
+8. **Taint findings are reworded** where the sink changed: `sink: network_egress` becomes
+   `sink: tool_response` for response scans, and the `"potential data exfiltration in response"`
+   line is gone — inbound data is not exfiltration. `decision` and `riskScore` are unchanged.
+9. **`agent_analytics` top-tool ties break by `tool_name` ASC**, so the top-5 list is stable across
+   reads and between backends where it previously depended on `HashMap` order.
+10. **Migrations `0008` and `0009` are added on both backends.** Additive: a new
+    `capability_tokens` table and a nullable `api_keys.agent_id` column. A `2.0.2` database opens
+    under `2.1.0` and runs `1→9`; existing agent keys are deliberately unusable until rotated
+    with a binding.
+
+### Added
+
+- **Capability tokens are an authorization primitive.** Signed with the agent's derived NHI secret
+  and verified by recomputing the HMAC (tampering with `capabilities`, `agentId` or `expiresAt`
+  invalidates it), persisted in the new `capability_tokens` table, and revocable through
+  `DELETE /v1/nhi/tokens/{tokenId}` — durable and fleet-wide, because the row is the authority.
+  `GET /v1/nhi/tokens` (admin) lists what is currently outstanding, signatures withheld —
+  `list_tokens()` / `listTokens()` in the SDKs, so revoking no longer means already knowing the
+  `tokenId` you are looking for.
+  Present one in the `X-IAGA-Capability-Token` header. `read:self` lets an agent read its **own**
+  `/v1/profiles/{id}`, `/v1/analytics/agents/{id}`, `/v1/fingerprint/{id}` and
+  `/v1/rate-limit/status/{id}`, which this release otherwise makes admin-only. A token is bound to one `agentId` and can never widen into another agent's data,
+  whatever capabilities it carries. New error `capability_required` (403), deliberately distinct
+  from `admin_scope_required`. Symmetric HMAC, so only the server can verify (CRYPTO-NHI-2);
+  relying-party-checkable asymmetric agent identity remains Enterprise (ADR 0010).
+
+  **Both SDKs can now send it, and a browser is allowed to.** Every method that mints one of these
+  told the caller to present it in `X-IAGA-Capability-Token`, and neither client had any way to:
+  the Python clients built a closed header dict with no `headers=` parameter, and the TypeScript
+  client's `headers` field is private with nothing in `SentinelClientOptions` to reach it. So the
+  documented remedy for the new admin-only reads was an instruction that could not be carried out
+  except by reaching into a private attribute. `SentinelClient(..., capability_token=...)` and
+  `new SentinelClient({ capabilityToken })` set it. The header is also added to the CORS
+  `allow_headers`, which held only `content-type` and `authorization` — without that a browser
+  preflight strips it and the remedy works only from curl. The two are one fix: either alone
+  changes nothing cross-origin.
+- **URL-embedded credential detection.** `scheme://user:secret@host` is recognized as secret
+  material. Deliberately narrow: the userinfo must carry a colon, so `https://host/p` and
+  `mailto:a@b.com` do not match.
+- **A bounded, prunable sandbox approval queue.** `IAGA_SENTINEL_MAX_SANDBOX_PENDING` (default
+  1000) and `IAGA_SENTINEL_SANDBOX_PENDING_TTL_MS` (default 24h), swept by the existing cleanup
+  task. The map previously shrank only when an admin approved or rejected.
+- **A startup warning** when open mode is enabled and the server is bound to a non-loopback
+  address — the combination that yields an unauthenticated admin API on every interface. The README
+  documented the danger; the binary was silent. The startup line now also logs `host`. Loopback is
+  decided by `IpAddr::is_loopback` after stripping IPv6 brackets, not by comparing the string
+  against `"127.0.0.1"` and `"::1"`: the address is composed as `format!("{host}:{port}")`, so the
+  exempted `::1` renders `::1:4010`, which is not a parseable `SocketAddr` and cannot bind at all,
+  while `[::1]` — the form that does bind — drew the warning, as did `localhost`. The exemption
+  covered exactly the spelling that could not run. `127.0.0.0/8` as a whole is exempt now too.
+- **Tests for eight surfaces that had none:** the Bash Claude Code hook (17 cases),
+  `agent_analytics`, the sandbox SQL classifier, response-scan session taint, capability-token
+  authorization, the plug-in clients' redirect refusal, the capability signature's survival of a
+  Postgres `TIMESTAMPTZ` round trip, and every remaining cross-agent read against an agent-scoped
+  key.
+
+### Fixed
+
+- **`docs/openapi.yaml` would not load in any OpenAPI viewer.** The `ttlSeconds` property of
+  `IssueTokenBody` carried two `description` keys — this release added the long one above the 2.0.2
+  stub and did not delete the stub. A duplicate mapping key breaks both ways: parsers that reject
+  duplicates (Swagger UI, Redoc, `swagger-parser`) refuse the entire document, and parsers that
+  tolerate them keep the **last**, silently discarding the explanation. The README advertises this
+  file as the full HTTP API specification and no CI step parses it. It now loads strictly: 72 paths,
+  79 schemas, and all 93 `$ref`s resolve.
+- **An agent-scoped key could submit signed evidence as any agent.** `agentId` came only from the
+  request, while a key carried a scope and label but no identity. A key bound for one caller could
+  therefore call `/v1/inspect` as another, receive that agent's otherwise protected profile, and
+  write the substituted id into the signed receipt. Migration `0009` stores the binding, the auth
+  cache carries it, and every HTTP surface that accepts a caller-owned `agentId` checks it before
+  acting. A capability token cannot widen the API key's identity. One nullable column is
+  intentional: profiles may be imported after keys are minted; issuance validates new keys and
+  authorization fails closed on old null rows.
+- **The prompt firewall's semantic stage was dead for semantic-only attacks.** Stage 3 ran only
+  after stage 1 or 2 had already found something, so `steal all credentials` returned `CLEAN`,
+  score 0. It now runs independently. The same audit closed full-width ASCII and mixed
+  Latin/Cyrillic bypasses, case/tag-boundary and multiline signature bypasses, UTF-8 byte/character
+  ratio errors, a `DAN` substring false positive, and nondeterministic category ordering in the
+  summary that enters signed reasons. Semantic intent is restricted to directive-shaped clauses,
+  so incident reports and defensive prose are not signed as attacks; inert `<img>`, `<svg>` and
+  `<link>` markup also passes while executable tags, event handlers and `javascript:` URLs remain
+  blocked.
+
+- **Signed exfiltration evidence on benign traffic.** `is_internal_url` matched against the whole
+  serialized payload, so the bare pattern `"10."` fired inside `"10.50"`, `"3.10.4"` and any
+  textual IPv4 in 10.0.0.0/8, and `.local`/`.corp`/`.internal` fired inside ordinary prose. That
+  labelled the request `INTERNAL_API`, which is forbidden at `NetworkEgress` with severity
+  `critical` — so the action was blocked, `layer_risks.taint` went to 100, and the receipt was
+  signed with `EXFILTRATION DETECTED`. It now reads only the destination-naming fields and anchors
+  the patterns to the host. Detection **improved** in passing: the old code matched only the
+  literal `127.0.0.1`, so `127.0.0.53` and the rest of 127.0.0.0/8 were never detected.
+
+  **What it stopped catching, and what was put back.** "Destination-naming fields" means the seven
+  names in `DEFAULT_EGRESS_DESTINATION_FIELDS`. The first cut of the narrowing read them at the TOP
+  LEVEL of a JSON object and kept only string values, so a destination nested in a sub-object,
+  inside an array, or in a top-level array stopped being seen at all — and an unseen destination
+  does not fall back to a refusal, it falls to the `else` branch that labels the action
+  `EXTERNAL_TOOL`. The narrowing had turned a false positive into a fail-OPEN. The scan now
+  descends through objects and arrays, so `{"request":{"url":…}}`, `{"url":[…]}`,
+  `{"webhook":{"href":…}}` and a top-level array of request objects are all labelled again.
+  A destination name carries into an ARRAY but not into an OBJECT: a list under `url` is a list of
+  destinations, while an object under `target` is a structure whose keys have to earn it again.
+  That asymmetry is load-bearing rather than fussy — carrying the name into objects reopens the
+  exact false positive this entry is about, one level deeper, because `host_of("10.50")` returns
+  `"10.50"` and that matches the `"10."` prefix, so `{"target":{"amount":"10.50"}}` would be signed
+  as EXFILTRATION DETECTED all over again. It was caught by reviewing the fix against itself, and
+  all three directions — nested destinations found, prose never a destination, and a non-destination
+  key under a destination key never a host — are covered by tests that were watched failing first.
+
+  What is still deliberately NOT caught: a destination under a key outside those seven. That one is
+  a genuine reduction against the old whole-payload sweep, taken on purpose — a nested destination
+  was never governed by the egress allowlist either, and guessing that an unrecognised key holds an
+  internal host is the guess that produced the signed false evidence. `scan_undeclared_hosts` is
+  top-level only as well. If your payloads use a different name, declare it in `destinationFields`
+  on the workspace policy.
+- **On Postgres, capability tokens failed to verify at all — the signature covered a timestamp
+  whose spelling the database changed.** The signature is taken over `expires_at` as a STRING, and
+  the mint used `chrono::to_rfc3339()`, which emits 0, 3, 6 or 9 fractional digits depending on the
+  value (`SecondsFormat::AutoSi`). The Postgres read path renders the `TIMESTAMPTZ` column back
+  through `to_char(..., 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00')`, which always emits exactly six. So
+  the string that came back was usually not the string that was signed, and the token failed
+  closed. Measured before the fix: **54 of 64 minted tokens stopped verifying** after the round
+  trip. That count is a sample, not a constant — re-measuring the same divergence in this
+  session gave 61 of 64. It depends on how many `Utc::now()` values happen to land on a
+  microsecond boundary, which is a property of the host clock; what is invariant is that a
+  mint emitting anything other than exactly six digits cannot verify after the round trip. SQLite never showed it — the column is `TEXT` there and hands back the bytes it was given,
+  which is why a backend-parity bug this total survived a green suite. The mint is now pinned to
+  microseconds (`rfc3339_storage`), so both backends agree.
+
+  **Proved against a real Postgres 16, not simulated.** `tests/capability_token_pg_roundtrip.rs`
+  models the `to_char` rendering in Rust, which is fast and runs everywhere but had never been
+  checked against the database it describes. Driving the release binary (built
+  `--features postgres`) at a live server: migrations run `1→8`, `expires_at` really is
+  `TIMESTAMPTZ`, and across 64 freshly minted tokens the string Postgres renders is byte-identical
+  to the string that was signed, every one carrying exactly six fractional digits. Mint → use →
+  revoke works end to end, revocation is durable in the row, and a token minted before a restart
+  still authorizes after it. Also checked with the database's default `TimeZone` set to
+  `Europe/Rome`: `to_char` renders in the session zone while the format string hardcodes `+00:00`,
+  so this would have been a second, quieter version of the same bug — the pool pins
+  `SET TIME ZONE 'UTC'` in `after_connect`, and the round trip holds.
+- **A durable capability token still died at the first restart, because the identity did not
+  persist.** Migration `0008` was added so a token "has to survive a restart and a revocation has
+  to be durable and fleet-wide". The token row did survive; the agent identity it is bound to did
+  not. `verify_token_signature` reads the agent's derived secret out of the in-memory registry and
+  fails closed when the agent is absent, and `main.rs` rebuilds that registry at boot from
+  `list_identities()` — so an identity that never reached storage is gone after a restart, and
+  every token bound to it stops verifying. `POST /v1/nhi/identities` never persisted: the handler
+  called the in-memory `register_identity` and did not even take `AppState`. `execute_pipeline` has
+  persisted its auto-registered identities since v0.4.0, so the defect was invisible to any flow
+  that ran an inspect first. Found by driving the release binary against a real Postgres: a token
+  minted before a restart answered `404 agent_not_found` after it. The handler now stores the
+  identity and its secret before it answers `201`, mirroring `issue_token_handler`.
+- **`iaga proxy` refused every tool of every real MCP server.** MCP schema validation knows four
+  tool names — `filesystem.read`, `filesystem.write`, `terminal.exec`, `http.fetch` — and answered
+  "invalid" for everything else, while the pipeline turns any schema failure into an unconditional
+  Block floor. Measured end to end: a fully registered agent, a workspace policy listing the
+  downstream tool at `maxDecision: allow`, and a harmless read still came back `block` on 100% of
+  proxied calls, with no configuration able to lift it, because the refusal landed before policy was
+  consulted. Four hardcoded names cannot be the allowlist for an open protocol. An unregistered tool
+  is now ADVISORY — the gap is named in the findings, and the layers that do know the tool (the
+  workspace tool registry, the domain allowlist, taint, the firewall) decide the verdict. An
+  unregistered tool is still refused; it is refused by the layer that actually knows.
+- **The MCP proxy never produced a receipt chain.** Every intercepted call omitted `sessionId`, so
+  receipt creation fell back to a fresh event UUID and a process handling N calls produced N
+  unrelated one-receipt runs. `proxy` and `mcp-doctor` now each mint one non-empty session id per
+  process and thread it through every governance check: when N is nonzero, their N calls/checks form
+  one N-receipt run (`<agent>:mcp-proxy-*` or `<agent>:mcp-doctor-*`). The proxy cache now reads taint under that same
+  session key. This also removes the accidental collision with agent-id-keyed state that `serve`
+  can rehydrate even though proxy mode does not; existing receipts are not relabelled. The proxy
+  regression test proves two allowed calls reach the downstream process and then verify as one
+  two-receipt chain; `mcp-doctor` exercises the same required interceptor parameter at compile time.
+- **An ordinary HTTP call followed by a shell call was labelled `reverse_shell_setup`.** The
+  signature required no taint or data-flow link, and the FSA independently forbade
+  `network_egress → shell`, so “download something, then run a command” blocked the whole session,
+  held later calls for 60 seconds and added a strike. The unsupported signature is gone (five
+  signatures remain, three critical) and that FSA transition is legal. The sequence still adds the
+  signed +25 `network-delivered execution arc` anomaly. An external response remains subject to the
+  per-request `EXTERNAL_TOOL → ShellExec` taint block; an internal API response is deliberately not
+  vetoed by that rule. This includes localhost, `127.*`, `10.*`, `192.168.*` and
+  `*.internal`/`*.local`/`*.corp`, the same exposure already granted to `file_read → shell` and
+  `db_query → shell`; neither case now poisons the whole session.
+- **`redactedPayload` returned the private key it had just found.** The `private_key_block` pattern
+  matched only the `-----BEGIN … PRIVATE KEY-----` line, and the same table drives the redaction, so
+  a PEM came back as the marker followed by the entire key body and the END line — correctly
+  flagged, correctly blocked, and fully disclosed in the one field a caller is entitled to treat as
+  safe. The marker made it look handled. The pattern now spans the whole block, including a
+  truncated key with no END marker, and two keys in one payload stay two separate redactions.
+- **A refusal could state no reason for refusing.** When the verdict came from the composite score
+  crossing a threshold rather than from a layer vetoing, `reasons` fell back to
+  `"no high-risk rule matched"` — so `"decision": "block"` arrived next to a reason saying nothing
+  matched. `reasons` is copied verbatim into the signed `ReceiptBody`, so the contradiction was
+  written into the audit event, the human review queue and the cryptographic evidence. A non-allow
+  fallback now names the score and the threshold it crossed.
+- **A resolved review could be silently re-flipped.** `update_status` was an unconditional UPDATE
+  with no state-machine guard and no history, so an admin key could approve a request, let the
+  console show it settled, then rewrite it to `rejected` — two `200 OK`s, one surviving row, and
+  nothing recording that the decision had ever been anything else. Resolution is terminal now, with
+  the guard in the WHERE clause so two concurrent resolutions cannot both win.
+- **`/v1/audit/export` date ranges were a lexical string compare**, on both backends. Measured over
+  the same one-hour window: `12:00:00+00:00` returned 34 rows, the identical instant written
+  `14:00:00+02:00` returned 0, `08:00:00-04:00` returned 0, and the literal string `yesterday`
+  returned 0 — every one of them `200 OK`. A filter that silently answers "no events" is worse than
+  one that errors. Bounds are parsed, converted to UTC and compared at second resolution;
+  unparseable input is now refused. `iaga cost --from/--to` had the same defect at six query sites
+  and got the same fix.
+- **CSV export did no escaping.** `agent_id`, `framework` and `tool_name` are free-form strings an
+  agent controls, so a comma shifted every later column, a quote broke the field, and a newline
+  split one audit record into two rows — the second parsing as a whole event with a fabricated
+  `event_id`. Measured: 5 of 33 exported records malformed. Fields are quoted per RFC 4180.
+- **Missing resources returned inconsistent status codes and malformed error bodies.** Missing DLQ
+  entries (retry/delete), webhooks, capability tokens (issue/revoke), NHI challenge identities,
+  sandbox entries (approve/reject), fingerprints, threat indicators, policy templates and session
+  metrics now all return `404` with the published `{error: "not_found", message: "..."}` shape. The
+  template route is the one compatibility change: its missing-id response was documented and
+  implemented as `400` since v0.4.0; 2.1.0 changes it to `404`. A DLQ entry whose webhook was removed remains the distinct
+  `400 invalid_request`, and the retry route now documents that response and its possible `500`.
+- **`GET /v1/audit/export?format=` silently fell back to JSON for unknown formats.** `xml`, `CSV`
+  and typos now return `400 invalid_request` naming the supported `json` and `csv` values, matching
+  the OpenAPI enum. An omitted or empty value still selects the documented JSON default.
+- **`iaga inspect --stdin` was documented and rejected.** The branch that reads stdin existed;
+  clap read the leading `--` of the positional as a flag and refused with exit 2 — the code the
+  convention reserves for a Block. Both its own `--help` and `AGENTS.md` promised the spelling.
+- **A credential leaving was weaker than a credential arriving.** `/v1/response/scan` ran a table of
+  compiled credential regexes; `/v1/inspect` — the direction where a secret is *leaving* — ran a
+  separate lowercase substring list, which only finds a credential carrying a giveaway word
+  (`api_key`, `password`, `bearer `). A credential that is an opaque token with a distinctive shape
+  has no such word: measured, `AKIAIOSFODNN7EXAMPLE` scored `review`/70 on the response path and
+  `allow`/2 with "no high-risk rule matched" on inspect. Nothing was missing from the product — one
+  detector did not share the other's patterns. The egress path now consults the same
+  `credential`-category table, and `tests/egress_credential_parity.rs` asserts PARITY rather than a
+  fixed list, so a family added to one cannot silently fail to reach the other.
+
+  Scope, stated precisely: the family this actually recovers today is the AWS access key id —
+  `ghp_`, PEM blocks and URL credentials were already covered on the egress side. And neither
+  detector knows Stripe, Slack or Google API keys: that is a real gap in the shared table, present
+  in both directions, and closing it is a separate change from making the two agree.
+- **`iaga validate` printed "Config is valid!" above a critical contradiction and exited 0**, and
+  `iaga import` then installed that policy, also with exit 0. The headline came first, several lines
+  above `error [critical] contradiction`, so a human read the verdict before the evidence against it
+  and a CI gate reading the exit code accepted a policy with no single meaning. The headline now
+  comes last and says what is true; `critical` fails both commands, `high`/`medium` stay advisory
+  (a policy that has not adopted `destinationFields` is legal). Duplicate issues are also collapsed
+  — a tool declared twice reported its contradiction twice.
+- **`iaga mcp-doctor --probe-tool X` printed `probe: FAILED` and exited 0**, so the one flag whose
+  purpose is "does calling this actually work" could not gate the CI job it exists for. A probe runs
+  only when asked for by name, so failing on it cannot surprise anyone who did not ask.
+- **The operator console reported "connected" while hiding fifteen panels.** It treated only `401`
+  as unauthorized, so an agent-scoped key — which the console itself can mint — left the banner
+  clear and the header green while 15 of 24 panels answered `403` and rendered their "No decisions
+  yet" placeholder. Being told there is nothing to see when there is, is the worst of the three
+  possible answers. A `403` now raises its own banner naming the scope and the fix.
+- **`ttlSeconds` accepted values that could not be honoured.** A negative TTL minted a `201` token
+  the API reported `valid: true` while every check rejected it as expired, and a value large enough
+  to push the expiry past year 9999 minted one that could not be rendered back at all. Both are now
+  refused with `400`, and the TTL is capped at one year — a bearer credential with no revocation
+  pressure on its holder should not be mintable for a decade because nothing stopped you.
+- **`review_created` was in the SSE enum, the webhook dispatcher, the OpenAPI event list,
+  FEATURES.md and the console's Live feed, and nothing ever constructed it.** The one event that
+  says "a human is needed" was the only one that never fired: an operator watching the stream saw
+  the action governed and then silence, while the queue filled with nobody told.
+- **`GET /v1/receipts` answered `200 OK` with `runs` as an error object** where the spec declares an
+  array and marks it required, so `d["runs"][:2]` raised a TypeError on a response the status line
+  called a success. The storage failure is still logged; the wire type the spec promises is not
+  broken to carry it.
+- **Resolving a review left no trace in the audit trail.** The resolution touched
+  `review_requests` and nothing else, so the governed action's row kept `reviewStatus: "pending"`
+  forever, no row was appended, and the operator who decided was recorded nowhere — the exportable
+  evidence record said no human had ever adjudicated anything. Two things were missing. The
+  `ReviewRequest` minted its own UUID and neither table had a foreign key to the other, so nothing
+  could say which action an adjudication belonged to; the request now carries the governed action's
+  `event_id`. And the resolution is APPENDED as its own audit event (framework
+  `review-resolution`, with `review-resolved:<status>`, `review-request:<eventId>` and
+  `resolved-by:<keyId>` in `reasons`) rather than rewriting the original row: that row's
+  `timestamp` is the DECISION time with no second column for the adjudication, so rewriting it in
+  place would assert a human approved the action at the instant it was governed, and the signed
+  receipt was already built from the row as it stood — an in-place update would put the SQL log out
+  of step with the evidence replayed from it. `append` is the only write `AuditStore` has.
+
+  The governed action's own row therefore keeps `reviewStatus: pending` for good: it records what
+  was true when the action was governed. The adjudication is the later row, joined to it by
+  `review-request:<eventId>`. Two stated costs: an adjudicated action now contributes two rows to
+  `/v1/audit/stats` and `agent_analytics`, and because `review_requests.tenant_id` has never been
+  written by anything, `/v1/audit/export?tenant_id=X` returns the governed action and not the
+  adjudication.
+- **An agent could forge the human-in-the-loop record.** `POST /v1/reviews/{id}` had no admin
+  guard, so an agent-scoped key could list the queue, find the request raised against its own
+  action, and mark it `approved`.
+- **Nineteen cross-tenant reads and the SSE firehose were open to any valid key.** The sharpest was
+  `GET /v1/workspaces`, which returns `threshold_block` and `threshold_review` — the exact number an
+  agent needs to tune itself to just under the block line. `GET /v1/policy/verify/{id}` and
+  `GET /v1/workspaces/{id}/rules` were the same disclosure one route over. The rest came out of
+  enumerating all 83 route/method pairs against their guards rather than sampling: the telemetry
+  buffer (the SSE firehose by another name), `/v1/nhi/identities` (every agent id, SPIFFE id, key
+  commitment and trust score — the target list for the per-agent reads), the session graphs, the
+  behavioural fingerprints, per-agent spend, and `/v1/sandbox/pending`, whose approve and reject
+  twins had been admin-only since 1.x.
+- **The Bash Claude Code hook failed open silently, with fail-closed switched on.** `curl` without
+  `-f` exits 0 on any HTTP status, and every `SentinelError` serializes to JSON, so `jq -e .`
+  accepted a 404/403/500 error body as a verdict, the fail-open/fail-closed branch was skipped
+  entirely, and `.decision // "allow"` returned `allow`. `IAGA_FAIL_CLOSED=1` was inert for exactly
+  the cases that matter: **404 `agent_not_found`** (the state of every install until the policy is
+  imported), **403 `scope_mismatch`**, and **500 `storage_error`** — a governance-database outage
+  let every tool call through. The hook now captures the status, routes every non-2xx through the
+  fail-closed gate, and writes a diagnostic to stderr, which it never did.
+- **Plug-in clients followed redirects.** The VoltAgent client now sends `redirect: "manual"`; the
+  Letta client and the Python Claude Code hook install an opener that refuses. Measured: a `302`
+  from the configured URL to a hostile server made the Letta client return that server's
+  `decision: "allow"`, and the Python hook log `allow (risk=0, receipt=)` — announcing a receipt
+  that does not exist. (Note 307/308 were never the hole: `urllib` already refuses those on a POST.)
+- **`maxDecision: block` was never enforced.** `evaluate_policy` tested only `== Review`, while
+  `formal_verify` reported an all-Block policy as a **critical deny-all** and `iaga validate`
+  printed it as an error — so a policy that permitted everything was described to the operator as
+  one that denied everything.
+- **Workspace rules were compared against the wrong risk scale.** The fields were named
+  `min/maxRiskScore` and fed the **adaptive layer** score (ceiling 64, measured band 9–48), while
+  every operator-visible number is the composite 0–100. The shipped `review-high-risk-shell`
+  (`min 60`) could never fire; `soc2-shell-hours` (`max 40`, decision Allow) fired almost
+  unconditionally. Renamed with serde aliases rather than rescaled: the composite depends on the
+  rule match, so feeding it back is a genuine cycle, and the 64 ceiling holds only at default
+  weights, which `POST /v1/risk/feedback` can lift.
+- **`agent_analytics` built its top-5 by splitting a CSV aggregate.** `STRING_AGG`/`GROUP_CONCAT`
+  materialized one entry per audit event to produce a five-element list, a tool named `read,write`
+  counted as two phantom tools, and the top-5 cut came out of `HashMap` order. Replaced with three
+  grouped queries; the per-agent N+1 is gone and `decisions_csv` — selected and never read on both
+  backends — with it.
+- **The sandbox read `SELECT ... WHERE deleted_at IS NULL` as a critical, irreversible DELETE.**
+  Substring matching on `DELETE`/`DROP`/`UPDATE`/`ALTER` also caught `dropbox_url`, `updated_at` and
+  `alternate_id`. Nothing signed moved, but it decided `requires_approval`, so it filled the human
+  approval queue with destructive-looking reads. Word-boundary matching now, copying the pattern
+  `analyze_shell` already used in the same file.
+- **NHI `created_at` diverged between backends.** Postgres wrote `NOW()` instead of binding the
+  identity's own value, and rendered it as `2026-08-19 12:34:56+00`, which does not parse as
+  RFC3339. Since this is the server's startup hydration path, that string is what
+  `GET /v1/nhi/identities` returned after every restart.
+- **Raw wall-clock subtraction in session eviction.** A backward clock step (NTP, VM snapshot
+  restore) panicked in debug — poisoning the global session map — and in release wrapped to a huge
+  `u64`, evicting every future-dated session in one sweep. Two sites, both now `saturating_sub`,
+  matching the four clock subtractions in the same file that already were.
+- **`/v1/audit/export?limit=` was unbounded**, so `?limit=4294967295` materialized the whole table
+  into one in-process `String`. Capped at 50 000, with the matching `maximum:` in the OpenAPI spec.
+- **`.dockerignore` did not match nested databases.** `*.db` matches only the context root, while
+  the test suite leaves one at `crates/iaga-sentinel-core/*.db` and the Dockerfile copies `crates/`.
+  Prefixed the DB patterns, `chain.json`, `.env` and `keys/` with `**/`.
+- **A tag could publish without passing the tests.** `ci.yml`, `release.yml` and `docker.yml` all
+  triggered independently on `v*`, and `publish` depended only on a `cargo build`. Both publish
+  paths now have a blocking test gate.
+- **Windows and macOS never compiled the test code.** `compile-sanity` ran `cargo build --workspace`
+  without `--all-targets`, and every Rust test job is ubuntu-only.
+- **The only end-to-end `GovernedTool` test had never run in CI.** It is `#[ignore]`d pending a live
+  seeded sidecar — which the CI `test` job has been standing up for other steps all along.
+
+### Changed
+
+- **`iaga-verify` now rejects a chain relabelled to a run that never happened.** The export's
+  top-level `run_id` is not covered by any signature, so a chain of genuinely signed receipts could
+  be re-pointed at an invented run and this verifier still printed `CHAIN OK` and exited 0 — while
+  the Python and Node verifiers refused the same file with exit 1. That made
+  `sdks/conformance/README.md`'s promise that all three reach the same verdict false. All three now
+  emit the identical `run_id mismatch` line. **A chain that verified before and fails now was
+  mislabelled**; the receipts themselves are untouched.
+- **`--expect-count` exists in all three verifiers.** It was the only documented offline defence
+  against tail truncation and shipped only in the Rust binary — missing from exactly the reader the
+  README sends to the dependency-free verifiers *because they cannot build Rust*.
+- **`iaga replay --list` and `GET /v1/receipts` read the terminal verdict from the signed receipt
+  body**, not from the denormalized `verdict` column beside it. An `UPDATE` on that column made both
+  surfaces report `allow` while the sealed evidence in the same row said `block` and the chain still
+  verified, with nothing flagging the divergence. The column stays for the indexed reads.
+- **`POST /v1/rate-limit/config` persists.** `save_config` shipped with a complete UPSERT on both
+  backends and no caller, while boot read the row back — so a tightened limit answered `200`,
+  survived until restart, then silently reverted to the defaults, and on multi-replica bound only
+  the replica that served the request.
+- **`iaga cost by-agent|by-model|by-tool` exit 1 on an unparseable `--from`/`--to`.** They rendered
+  a rejected bound as `[]` with exit 0 — byte-identical to a legitimate "no spend in that window".
+  `cost summary` already exited 1; the three now match it.
+- **The boot log redacts the database password.** `DATABASE_URL` was logged verbatim at INFO, so a
+  PostgreSQL deployment wrote its password to stdout on every start — and under the Helm chart that
+  value comes from a Secret and lands in the pod log. The product's own response scanner classifies
+  that line as a `connection_string` leak.
+- **Applying migration `0009` says what it just did.** Every agent-scoped key minted before it has a
+  null binding and starts answering `403 agent_key_unbound`, which is deliberate — but the count was
+  known at migration time and went unsaid at the default log level, so the first signal was a 403 in
+  a caller's face. Anything that fails *open* on an unexpected status turned that into a silent
+  `allow`: the Claude Code hook's default did exactly that, which its README now warns about.
+- **`404` on capability-token mint and NHI challenge names the remedy** instead of only the symptom.
+  An agent can hold a profile and an agent-scoped key and still have no NHI identity, so
+  "Agent not registered" was reachable while following the upgrade notes.
+- **The Python SDK's action-type heuristic tested `read`/`file` before `write`**, so
+  `filesystem.write` and `write_file` reported `file_read`, and its shell branch matched only
+  `shell`/`terminal`, so `Bash` reported `custom`. Each was scored on the wrong weight
+  (`file_read` 15 vs `file_write` 40; `custom` 25 vs `shell` 60), and the same name classified
+  differently here than in the TypeScript SDK, so one policy could not govern both runtimes.
+- **`SinkType::ToolResponse`** replaces `NetworkEgress` for response scanning. A secret in the
+  response still blocks; the labels that describe where data came *from* no longer apply to data
+  coming *in*, and inherited session labels no longer decide the verdict.
+
+### Removed
+
+- `modules/policy/hierarchy.rs` (205 lines): implemented `extends:` policy inheritance.
+  `WorkspacePolicy` has no such field, no migration adds the column, and it had zero callers — four
+  in-file tests kept it green and therefore invisible.
+- The `TenantStore` trait and both implementations (148 lines): zero call sites; the
+  `StorageBundle`/`AppState` fields were populated and never dereferenced. **The `tenants` table
+  stays** — on Postgres it is the target of six foreign keys, counted on a live 2.1.0 database — as does the `Tenant` type.
+- `crates/iaga-sentinel-core/fuzz/` (127 lines): unbuildable since the 1.1.0 rename, because it
+  depends on a package name that no longer exists. Every invariant its three targets asserted is
+  already covered in `tests/property_tests.rs`, whose five `proptest!` blocks run 500, 500, 300,
+  200 and 500 cases.
+- `config/load_config.rs` (50 lines): zero callers. The three inline readers in `main.rs` are
+  deliberately **not** merged into it — they scan a different filename set and exit differently, on
+  purpose.
+- Nine of the sixteen SQLite column backfills and their Postgres twins: unreachable by
+  construction, because the migrator runs to completion before the loop starts. They could not even
+  rescue the case they were written for.
+- `TractEngine::from_runnables`, `AgentFingerprintResponse` (a stale duplicate of the type that
+  actually serializes), the duplicated `inferActionType` in the TypeScript adapters, the two
+  unreadable receipt indexes (`idx_receipts_verdict`, `idx_receipts_timestamp`), and the Python
+  SDK's `sync` extra declaring `requests`, which no module imports.
+
+### Verification
+
+- `cargo fmt --all --check` and both CI clippy jobs are clean with `-D warnings`.
+- `cargo test --workspace`: **665 passed, 0 failed, 2 ignored** (up from 546 at `b444886`, measured
+  by running the suite in a worktree at that commit rather than quoted). The two ignored are the
+  live-sidecar `GovernedTool` cases, which CI runs with `-- --ignored` in its SDK e2e step.
+  `cargo test -p iaga-sentinel-core --features postgres`: **477 passed, 0 failed** and
+  `cargo test -p iaga-sentinel-receipts --features postgres`: **46 passed, 0 failed**, both against
+  a live PostgreSQL 16. `cargo test --workspace --all-features -j 2`: **731 passed, 0 failed**.
+  The `-j 2` is required only for the all-features build on Windows: unconstrained it dies at link
+  with `LNK1102` / `os error 1455` (pagefile), having run **zero** tests. That is a workstation
+  limit, not a result — CI runs the same step on Ubuntu after reclaiming ~20 GB.
+- Each of the eight per-feature CI steps run clean on its own: `ml`, `plugins`, `dictum-wasm`,
+  `plugins,plugin-attestation`, `otel-receipts`, `plugin-manifest-signing`, `cost-control`, and the
+  `linux-bpf` scaffold build.
+- The Operator Console was rendered, not only fetched: all **13 views** driven through headless
+  Chrome with JavaScript executed, no console errors, no error banner, and the Decisions table
+  showing the actions that had just been governed. All **30** endpoints the console polls answer
+  `200`; SSE delivered every `action_governed` event live; the exported chain verified `CHAIN OK`
+  against a **pinned** key from the Rust, Python and Node verifiers with byte-identical output.
+- **Not verified here, stated rather than implied:** CI has never run against this tree, so every
+  number above is a Windows workstation. The shipped binaries are built at default features, so the
+  `DATABASE_URL` redaction below is covered by a unit test rather than a live PostgreSQL boot, and
+  the chart's PostgreSQL install needs an image built with `--features postgres` (see Known gaps).
+
+### Known gaps
+
+- Carried over from 2.0.2 and still true: `iaga migrate` reads SQLite only (`postgres` is not a
+  default feature, so this holds for every shipped artefact), `iaga replay --export` is SQLite-only
+  for the same reason (`main.rs:3079`, chain export and offline verification are unavailable on
+  Postgres), `POST /v1/nhi/challenge` does not persist on Postgres, `RUSTSEC-2026-0217` is still
+  ignored in `.cargo/audit.toml`, Dictum still cannot match on destination keys
+  (see the egress item above), and `ghcr.io/iaga-team/iaga-sentinel` does not resolve.
+- `POST /v1/inspect` still returns the caller's own `workspacePolicy`, thresholds included. The
+  admin guard added here restricts **cross-workspace** reads; a caller reading back the policy it
+  was just governed by is unchanged, and the receipt wire format depends on it.
+- **PostgreSQL is a compile-time feature and the shipped `Dockerfile` does not enable it.** The
+  chart's own headline install sets `postgres.enabled=true`, but an image built from this repository
+  as-is exits 1 on a `postgres://` URL — after printing the full "server is up" banner, so in a
+  cluster the only clue is a `CrashLoopBackOff`. Build with
+  `--features postgres` or leave `postgres.enabled` off. Documented in
+  `charts/iaga-sentinel/README.md`; the `Dockerfile` is deliberately unchanged in this release.
+- **The stdio MCP planes carry no identity binding.** `iaga mcp-server` and `iaga proxy` present no
+  API key, so the `agentId` they submit is asserted rather than enforced and any local caller can
+  obtain a signed receipt under any agent id. Inherent to stdio, unchanged from 2.0.2, and now
+  stated in `AGENTS.md` §8 next to the binding it qualifies.
+- **Verifying a chain without `--key` proves internal consistency, not authorship.** The verifier
+  falls back to the key embedded in the export, which a forger who re-signed the chain also
+  supplied; it warns on stderr and stamps `key=embedded`. This is the design of ADR 0015 and is
+  unchanged, but the README's own example omitted the flag — it now pins the key and says why.
+- **The SSE event payload is snake_case (`tool_name`, `risk_score`) while the REST audit surface is
+  camelCase.** Unchanged from 2.0.2 and the console reads both, but a client written against one
+  shape will not read the other.
+
+---
+
 ## [2.0.2], 2026-08-10 — The Thresholds Postgres Never Read
 
 Follow-up hardening after a live 76-request attack-suite case study. Two attacks got through, both
@@ -1352,7 +1921,8 @@ tunable defaults to the previous hardcoded behavior.
   verify-every-request). Key deletion invalidates the cache immediately.
 - **API-key scopes** (minimal, single-tenant): `admin` (default — identical to
   pre-1.5.2 keys; all existing keys stay admin via migration 0005) and `agent`
-  (governance surface only). `iaga gen-key --scope agent`, `scope` on
+  (governance surface only). `iaga gen-key --scope agent --agent-id <id>` (the identity argument is
+  required since 2.1.0), `scope` and `agentId` on
   `POST /v1/auth/keys`, and admin-only enforcement (403 `admin_scope_required`)
   on key/webhook/DLQ management, rate-limit config, threat-intel mutations, and
   plugin reloads. Multi-tenant/SSO/SIEM remain Enterprise (ADR 0010).

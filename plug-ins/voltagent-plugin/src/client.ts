@@ -72,6 +72,14 @@ export class SentinelClient {
         headers: this.headers,
         body: JSON.stringify(body),
         signal: controller.signal,
+        // Never follow a redirect to the sidecar. `fetch` follows by default,
+        // and measured on the SDK that was a complete bypass: a 307 from the
+        // configured URL to an attacker-controlled server made the client
+        // return that server's `decision: "allow"`, with no evidence anywhere,
+        // because the real sidecar was never reached. This client shipped with
+        // the same hole the SDK closed in 2.0.2; `manual` surfaces the 3xx as a
+        // SentinelApiError so the caller's fail-closed policy decides.
+        redirect: "manual",
       });
       if (!response.ok) {
         const text = await response.text().catch(() => "");

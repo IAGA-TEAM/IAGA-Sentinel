@@ -5,6 +5,7 @@ import {
   inspectWithPolicy,
 } from "../client";
 import type { ActionType, InspectRequest, JsonObject, OpenAIAdapterOptions } from "../types";
+import { inferActionType } from "./infer-action-type";
 
 /**
  * Wraps an MCP tool handler so every `tools/call` is inspected before it runs.
@@ -23,15 +24,6 @@ import type { ActionType, InspectRequest, JsonObject, OpenAIAdapterOptions } fro
 export interface GovernMcpToolOptions extends OpenAIAdapterOptions {
   toolName?: string;
   actionType?: ActionType;
-}
-
-function inferActionType(name: string): ActionType {
-  const n = name.toLowerCase();
-  if (/(shell|bash|terminal|exec|command)/.test(n)) return "shell";
-  if (/(http|fetch|web|url|request)/.test(n)) return "http";
-  if (/(write|edit|create|delete)/.test(n)) return "file_write";
-  if (/(read|file|glob|grep|cat|list)/.test(n)) return "file_read";
-  return "custom";
 }
 
 type AnyHandler = (...args: never[]) => unknown;

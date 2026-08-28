@@ -488,10 +488,18 @@ const ENDPOINTS={auditStats:'/v1/audit/stats',audit:'/v1/audit',agents:'/v1/anal
 async function refreshData(){
   if(state.refreshing)return;state.refreshing=true;
   const keys=Object.keys(ENDPOINTS);const results=await Promise.all(keys.map(k=>fetchJson(ENDPOINTS[k])));
-  let unauthorized=false;
-  keys.forEach((k,i)=>{const r=results[i];if(r.status===401)unauthorized=true;state.data[k]=r.ok?r.data:(state.data[k]??null);});
+  // 401 and 403 are different answers and the console used to read only 401.
+  // With an agent-scoped key — which this very console can mint — 15 of the 24
+  // panels answered 403 and the other 9 answered 200, so `unauthorized` stayed
+  // false, the banner stayed clear, the header said connected, and the empty
+  // panels rendered their "No decisions yet" placeholder. An operator was told
+  // there was nothing to see while there was, which is the worst of the three
+  // possible answers.
+  let unauthorized=false,forbidden=0;
+  keys.forEach((k,i)=>{const r=results[i];if(r.status===401)unauthorized=true;if(r.status===403)forbidden++;state.data[k]=r.ok?r.data:(state.data[k]??null);});
   state.connected=!unauthorized&&results.some(r=>r.ok);
   if(unauthorized)setBanner(state.context&&state.context.apiKeysConfigured?'Unauthorized. Add a key in <a href="#/settings">Settings</a> and press Connect.':'Unauthorized. Run <code>iaga gen-key</code>, then add it in <a href="#/settings">Settings</a>.');
+  else if(forbidden)setBanner('This key is <strong>agent-scoped</strong>: '+forbidden+' of '+keys.length+' panels are admin-only and are showing nothing, not empty. Use an admin key (<code>iaga gen-key --scope admin</code>) in <a href="#/settings">Settings</a>.');
   else if(!state.connected)setBanner('Could not reach the runtime. Is <code>iaga serve</code> running on this origin?');
   else setBanner('');
   pill('pill-refresh','refreshed '+new Date().toLocaleTimeString());
@@ -824,9 +832,9 @@ function renderSettings(){
   const keys=state.data.apiKeys||[];
   $('apikeys-panel').innerHTML=`<h3>API keys</h3>
     ${state.createdKey?`<div class="banner" style="margin-bottom:10px">New key (shown once): <span class="mono">${esc(state.createdKey)}</span></div>`:''}
-    <div class="table-wrap" style="border:0"><table><thead><tr><th>Label</th><th>Scope</th><th>Created</th><th></th></tr></thead>
-    <tbody>${keys.length?keys.map(k=>`<tr><td>${esc(k.label)}</td><td>${badge(k.scope||'admin','neutral')}</td><td class="id">${esc(String(k.createdAt||k.created_at||'').slice(0,10))}</td><td class="num"><button class="btn sm" data-key-delete="${esc(k.id)}">Delete</button></td></tr>`).join(''):`<tr><td colspan="4"><div class="empty">No keys. Create one to protect the runtime.</div></td></tr>`}</tbody></table></div>
-    <div class="controls" style="margin-top:12px;margin-bottom:0"><input type="text" id="key-label" placeholder="key label"><select id="key-scope"><option value="admin">admin</option><option value="agent">agent</option></select><button class="btn sm primary" id="key-add">Create key</button></div>`;
+    <div class="table-wrap" style="border:0"><table><thead><tr><th>Label</th><th>Scope</th><th>Agent</th><th>Created</th><th></th></tr></thead>
+    <tbody>${keys.length?keys.map(k=>`<tr><td>${esc(k.label)}</td><td>${badge(k.scope||'admin','neutral')}</td><td class="id">${esc(k.agentId||'—')}</td><td class="id">${esc(String(k.createdAt||k.created_at||'').slice(0,10))}</td><td class="num"><button class="btn sm" data-key-delete="${esc(k.id)}">Delete</button></td></tr>`).join(''):`<tr><td colspan="5"><div class="empty">No keys. Create one to protect the runtime.</div></td></tr>`}</tbody></table></div>
+    <div class="controls" style="margin-top:12px;margin-bottom:0"><input type="text" id="key-label" placeholder="key label"><select id="key-scope"><option value="admin">admin</option><option value="agent">agent</option></select><input type="text" id="key-agent" placeholder="agent id (agent scope)"><button class="btn sm primary" id="key-add">Create key</button></div>`;
 }
 
 /* ── Mutations ── */
@@ -903,7 +911,7 @@ function wireEvents(){
     else if(t.id==='plugins-reload')await post('/v1/plugins/reload');
     else if(t.id==='ws-verify')await verifyWorkspace();
     else if(t.id==='wh-add'){const url=$('wh-url').value.trim(),secret=$('wh-secret').value.trim();if(url)await post('/v1/webhooks',{url,secret,event_filter:[]});}
-    else if(t.id==='key-add'){const label=$('key-label').value.trim()||'console-key';const scope=$('key-scope').value;const r=await fetchJson('/v1/auth/keys',{method:'POST',body:JSON.stringify({label,scope})});if(r.ok&&r.data&&r.data.key){state.createdKey=r.data.key;}await refreshData();}
+    else if(t.id==='key-add'){const label=$('key-label').value.trim()||'console-key';const scope=$('key-scope').value;const agentId=$('key-agent').value.trim();const body={label,scope};if(scope==='agent')body.agentId=agentId;const r=await fetchJson('/v1/auth/keys',{method:'POST',body:JSON.stringify(body)});if(r.ok&&r.data&&r.data.key){state.createdKey=r.data.key;}await refreshData();}
   });
   document.body.addEventListener('change',e=>{if(e.target.id==='ws-select')state.selectedWorkspace=e.target.value;});
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshData();});

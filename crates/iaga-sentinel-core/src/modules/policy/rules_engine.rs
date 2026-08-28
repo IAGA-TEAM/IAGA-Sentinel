@@ -68,12 +68,32 @@ pub struct ConditionSet {
     /// Time window during which this rule is active.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_window: Option<TimeWindow>,
-    /// Maximum risk score for this rule to apply (below this → rule applies).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_risk_score: Option<u32>,
-    /// Minimum risk score for this rule to apply.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_risk_score: Option<u32>,
+    /// Maximum ADAPTIVE score for this rule to apply (at or below → applies).
+    ///
+    /// The ADAPTIVE layer score, not the composite `risk.score` the API
+    /// returns. They are different scales and they do not overlap where it
+    /// matters: the adaptive score's arithmetic ceiling is 64 at default
+    /// weights and its measured band is 9..48, while the composite spans 2..84.
+    /// Named `*_risk_score` until 2.1.0, which read as "the number I can see in
+    /// the response" and is what made the shipped `review-high-risk-shell` rule
+    /// (`min 60`) unreachable and `soc2-shell-hours` (`max 40`, decision Allow)
+    /// fire almost unconditionally.
+    ///
+    /// It is not fixable by rescaling: the composite depends on
+    /// `minimum_decision`, which this rule match produces, so feeding it back
+    /// here is a genuine cycle -- and the 64 ceiling holds only for the default
+    /// weights, which `POST /v1/risk/feedback` can renormalise upward.
+    ///
+    /// `alias` is load-bearing: rules are persisted as opaque JSON
+    /// (`sqlite.rs`/`postgres.rs` store `conditions` as a string), so without it
+    /// a stored `maxRiskScore` would deserialize to `None` and the gate would
+    /// silently vanish -- turning a bounded Allow into an unconditional one.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "maxRiskScore")]
+    pub max_adaptive_score: Option<u32>,
+    /// Minimum ADAPTIVE score for this rule to apply. See
+    /// [`ConditionSet::max_adaptive_score`] for the scale and the alias.
+    #[serde(skip_serializing_if = "Option::is_none", alias = "minRiskScore")]
+    pub min_adaptive_score: Option<u32>,
     /// Payload must contain ALL of these strings.
     #[serde(default)]
     pub payload_contains: Vec<String>,
@@ -191,14 +211,14 @@ fn check_conditions(
     }
 
     // Risk score bounds
-    if let Some(max) = conditions.max_risk_score {
+    if let Some(max) = conditions.max_adaptive_score {
         if let Some(risk) = current_risk {
             if risk > max {
                 return false;
             }
         }
     }
-    if let Some(min) = conditions.min_risk_score {
+    if let Some(min) = conditions.min_adaptive_score {
         if let Some(risk) = current_risk {
             if risk < min {
                 return false;
@@ -305,7 +325,7 @@ mod tests {
             priority: 0,
             match_criteria: MatchCriteria::default(),
             conditions: ConditionSet {
-                max_risk_score: Some(30),
+                max_adaptive_score: Some(30),
                 ..Default::default()
             },
             decision: GovernanceDecision::Allow,
@@ -388,5 +408,42 @@ mod tests {
 
         let req2 = make_request(ActionType::Shell, "terminal.exec");
         assert!(evaluate_rules(&rules, &req2, AgentRole::Builder, None, test_time()).is_none());
+    }
+
+    /// Rules are persisted as an opaque JSON string, so the 2.1.0 rename from
+    /// `minRiskScore`/`maxRiskScore` had to stay wire-compatible. Without the
+    /// serde aliases a stored rule's bound would deserialize to `None` and the
+    /// gate would silently disappear -- and for a `maxRiskScore`-bounded Allow
+    /// that is fail-OPEN: a bounded allowance becomes an unconditional one.
+    #[test]
+    fn the_legacy_risk_score_condition_keys_still_deserialize() {
+        let stored = r#"{"minRiskScore":20,"maxRiskScore":45}"#;
+        let conditions: ConditionSet =
+            serde_json::from_str(stored).expect("a stored rule must still parse");
+
+        assert_eq!(
+            conditions.min_adaptive_score,
+            Some(20),
+            "minRiskScore was dropped; the lower bound silently vanished"
+        );
+        assert_eq!(
+            conditions.max_adaptive_score,
+            Some(45),
+            "maxRiskScore was dropped; a bounded Allow became unconditional"
+        );
+    }
+
+    /// The new names are what gets WRITTEN back.
+    #[test]
+    fn conditions_serialize_under_the_adaptive_names() {
+        let conditions = ConditionSet {
+            min_adaptive_score: Some(35),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&conditions).expect("serialize");
+        assert!(
+            json.contains("minAdaptiveScore"),
+            "expected the renamed key, got {json}"
+        );
     }
 }

@@ -102,15 +102,37 @@ def resolve_action_type(
 
 
 def infer_action_type(tool_name: str, default: ActionType = ActionType.CUSTOM) -> ActionType:
+    """Guess an action type from a tool name.
+
+    Order matters, and it was wrong two ways.
+
+    `read`/`file` were tested BEFORE `write`, so `filesystem.write`,
+    `write_file` and `save_file` all reported `file_read` -- and the shell
+    branch matched only `shell`/`terminal`, so `Bash`, the single most common
+    tool name in the ecosystem, reported `custom`.
+
+    Neither skips review outright: a tool policy binds action types, so a
+    misdeclared type is refused when the name is known. The damage is that every
+    unknown-name path is scored on the wrong weight (`file_read` 15 against
+    `file_write` 40, `custom` 25 against `shell` 60), and that the same name
+    classified differently here than in the TypeScript SDK and the two Claude
+    Code hooks -- so a single policy could not govern both runtimes.
+
+    `write` before `read`/`file`, and `bash` in the shell branch, is what makes
+    this agree with `inferActionType` in the TypeScript adapters for the names
+    that actually collide. The two heuristics are still not identical (the
+    TypeScript one also matches `exec`, `fetch`, `glob`, ...); declare
+    `action_types={...}` when the answer matters rather than relying on either.
+    """
     tool = tool_name.lower()
     if "http" in tool or "openai" in tool or "response" in tool:
         return ActionType.HTTP
-    if "shell" in tool or "terminal" in tool:
+    if "shell" in tool or "bash" in tool or "terminal" in tool:
         return ActionType.SHELL
-    if "read" in tool or "file" in tool:
-        return ActionType.FILE_READ
     if "write" in tool:
         return ActionType.FILE_WRITE
+    if "read" in tool or "file" in tool:
+        return ActionType.FILE_READ
     return default
 
 

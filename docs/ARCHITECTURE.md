@@ -74,7 +74,14 @@ as `pluginResults`.
 ### Layer 3 - NHI Registry
 
 - creates non-human identities for agents
-- supports challenge-response attestation and capability tokens
+- supports challenge-response attestation
+- issues capability tokens: signed with the agent's derived NHI secret, bound to
+  one `agentId`, persisted, and revocable. `read:self` lets an agent read its own
+  profile and analytics, which are otherwise admin-only. Symmetric HMAC, so only
+  the server can verify (CRYPTO-NHI-2) — relying-party-checkable asymmetric agent
+  identity is Enterprise (ADR 0010). Through 2.0.2 the token authorized nothing:
+  the signature was never checked, tokens lived only in process memory, and there
+  was no way to revoke one.
 - still needs a fully closed restart hydration story
 
 ### Layer 4 - Adaptive Risk
@@ -136,12 +143,24 @@ The runtime selects the backend from `DATABASE_URL`:
 
 ### Migrations
 
+> Unlike the rest of this file, this subsection is kept current: it is the one place a reader
+> arrives at looking for where migrations live, and sending them to a directory that has not
+> existed since 1.1.0 costs more than the inconsistency.
+
 Schema migrations are versioned under:
 
-- `community/migrations/sqlite/`
-- `community/migrations/postgres/`
+- `crates/iaga-sentinel-core/migrations/sqlite/`
+- `crates/iaga-sentinel-core/migrations/postgres/`
 
-The runtime runs them through `sqlx::migrate!()`.
+The runtime runs them through `sqlx::migrate!()`, which checksums each version — so a file that
+has already been applied somewhere must never be edited, and a new migration must take the next
+free number rather than reuse one.
+
+The receipt store keeps its own schema under `crates/iaga-sentinel-receipts/migrations/`, and
+deliberately does **not** use `sqlx::migrate!`: it frequently shares one SQLite database with the
+core store, which owns the single `_sqlx_migrations` table, and a second migrator there sees
+versions it does not know and refuses to open. That file is idempotent and re-executed on every
+open instead.
 
 There is also a compatibility layer that backfills columns needed by older
 community databases.

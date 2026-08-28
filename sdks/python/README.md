@@ -39,7 +39,7 @@ from iaga_sentinel import ActionDetail, ActionType, SentinelClient, InspectReque
 client = SentinelClient(api_key="ak-local")
 result = client.inspect(
     InspectRequest(
-        agent_id="builder-01",
+        agent_id="openclaw-builder-01",
         workspace_id="ws-demo",
         framework="openai",
         session_id="session-123",
@@ -54,6 +54,32 @@ result = client.inspect(
 print(result.decision.value, result.trace_id)
 ```
 
+
+## Reading an agent's own record (2.1.0)
+
+The per-agent reads are admin-only as of 2.1.0, because any valid key could
+previously read any agent's data. An agent-scoped key reaches its **own** record
+by presenting a capability token minted by an admin:
+
+```python
+admin = SentinelClient(api_key="ak-admin")
+created = admin.create_key("builder", scope="agent", agent_id="openclaw-builder-01")
+token = admin.issue_token(agent_id="openclaw-builder-01", capabilities=["read:self"])
+
+agent = SentinelClient(api_key=created["key"], capability_token=token["tokenId"])
+agent.get_profile("openclaw-builder-01")          # 200
+agent.get_profile("someone-else")        # 403 agent_scope_mismatch
+```
+
+The API key and token are both bound to the same `agentId`; neither can widen
+into another agent's data, whatever capabilities the token carries. Agent keys
+created before 2.1.0 have no binding and fail closed until rotated. The token
+covers `/v1/profiles/{id}`,
+`/v1/analytics/agents/{id}`, `/v1/fingerprint/{id}` and
+`/v1/rate-limit/status/{id}`. `admin.list_tokens()` shows what is outstanding
+(signatures withheld) and `admin.revoke_token(token_id)` withdraws one;
+revocation is durable and fleet-wide.
+
 ## Adapters
 
 ```python
@@ -61,17 +87,17 @@ from openai import OpenAI
 
 from iaga_sentinel.adapters import SentinelCallbackHandler, SentinelGuardrail, sentinel_wrap_openai
 
-openai_client = sentinel_wrap_openai(OpenAI(), agent_id="builder-01", api_key="ak-local")
-langchain_handler = SentinelCallbackHandler(agent_id="builder-01", api_key="ak-local")
-crewai_guardrail = SentinelGuardrail(agent_id="builder-01", api_key="ak-local")
+openai_client = sentinel_wrap_openai(OpenAI(), agent_id="openclaw-builder-01", api_key="ak-local")
+langchain_handler = SentinelCallbackHandler(agent_id="openclaw-builder-01", api_key="ak-local")
+crewai_guardrail = SentinelGuardrail(agent_id="openclaw-builder-01", api_key="ak-local")
 ```
 
 ### Adapters classify by tool name — declare `custom`
 
 A framework hands the adapter a tool *name*, not an action type, so
 `adapters._common.infer_action_type` guesses one from substrings in that name:
-`http`/`openai`/`response` → `http`, `shell`/`terminal` → `shell`,
-`read`/`file` → `file_read`, `write` → `file_write`. Everything else falls back
+`http`/`openai`/`response` → `http`, `shell`/`bash`/`terminal` → `shell`,
+`write` → `file_write`, `read`/`file` → `file_read`. Everything else falls back
 to **`custom`** — and most real tool names fall in that bucket
 (`search_docs`, `lookup_customer`, `get_weather`, `query_database`,
 `summarize`, `calculator`, …).
@@ -93,7 +119,7 @@ was never told about. Two ways out, and they are not equivalent:
 
 ```python
 handler = SentinelCallbackHandler(
-    agent_id="builder-01",
+    agent_id="openclaw-builder-01",
     action_types={
         "search_docs": ActionType.FILE_READ,
         "query_database": ActionType.DB_QUERY,

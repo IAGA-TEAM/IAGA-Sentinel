@@ -19,6 +19,21 @@ use sha2::{Digest, Sha256};
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallNode {
     pub id: String,
+    /// Which agent made this call.
+    ///
+    /// The session key is the client-declared `metadata.sessionId`, so two
+    /// agents that declare the same one share ONE DAG — and both SDK READMEs
+    /// hardcode `sessionId: "session-123"`, which makes a shared session the
+    /// copy-paste default rather than an exotic case. Without a per-node actor
+    /// the graph could not say who did what, and the block reasons derived from
+    /// it named the wrong agent inside a SIGNED receipt.
+    ///
+    /// `serde(default)`: node arrays persisted before this field
+    /// (`session_graphs.nodes_json`, a JSON blob — no migration) load with an
+    /// empty id, which every reader treats as "unattributed", never as an agent
+    /// literally named "".
+    #[serde(default)]
+    pub agent_id: String,
     pub tool_name: String,
     pub action_type: String,
     pub timestamp: u64,
@@ -96,6 +111,13 @@ pub struct AttackMatch {
     pub severity: String,
     pub confidence: f64,
     pub matched_nodes: Vec<String>,
+    /// The agents whose calls form the matched chain, sorted and deduped (empty
+    /// when the nodes predate `ToolCallNode::agent_id`).
+    ///
+    /// The DAG is shared by every agent that declared this sessionId, so a
+    /// chain can be made entirely of someone else's calls. Naming them is what
+    /// keeps a sibling's signed receipt from asserting that IT exfiltrated data.
+    pub agents: Vec<String>,
 }
 
 fn attack_signatures() -> Vec<AttackSignature> {
@@ -114,13 +136,9 @@ fn attack_signatures() -> Vec<AttackSignature> {
             pattern: vec!["file_read".into(), "email".into()],
             required_taints: Some(vec!["secret".into()]),
         },
-        AttackSignature {
-            name: "reverse_shell_setup".into(),
-            description: "HTTP fetch followed by shell execution".into(),
-            severity: "critical".into(),
-            pattern: vec!["http".into(), "shell".into()],
-            required_taints: None,
-        },
+        // A bare HTTP → shell sequence has no data-flow or command linkage.
+        // It remains visible as anomaly evidence below, but is not proof of a
+        // reverse shell and must not hold the entire session.
         AttackSignature {
             name: "lateral_movement".into(),
             description: "Read internal data, query DB, then network egress".into(),
@@ -275,6 +293,17 @@ fn default_transitions() -> Vec<Transition> {
             action: "http",
             to: FSAState::NetworkEgress,
         },
+        // ponytail: this is intentionally legal. External responses still hit
+        // the per-request EXTERNAL_TOOL → ShellExec taint rule. HTTP to
+        // localhost, 127.*, 10.*, 192.168.* or *.internal/*.local/*.corp is
+        // INTERNAL_API instead, so its later shell call is not vetoed by taint;
+        // that is the same exposure already allowed for file_read/db_query →
+        // shell. Both cases retain the +25 session anomaly evidence.
+        Transition {
+            from: FSAState::NetworkEgress,
+            action: "shell",
+            to: FSAState::Processing,
+        },
     ]
 }
 
@@ -383,7 +412,15 @@ pub fn add_tool_call_to_session(
     // Evict stale sessions when at capacity before inserting a new entry.
     if !store.contains_key(session_id) && store.len() >= *MAX_SESSIONS {
         let now = now_ms();
-        store.retain(|_, s| now - s.last_activity < *SESSION_TTL_MS);
+        // saturating, like every other clock subtraction in this file (:409,
+        // :869, and the DET-7 pair at :686/:690). `now_ms` is the wall clock and
+        // `last_activity` can sit in the future after an NTP correction, a VM
+        // snapshot restore, or a manual clock set. Raw `-` then panics in debug
+        // inside `retain`'s closure -- poisoning the global SESSIONS map on the
+        // way out -- and in release wraps to a huge u64, which is never
+        // `< SESSION_TTL_MS`, so a single sweep evicts every future-dated
+        // session at once.
+        store.retain(|_, s| now.saturating_sub(s.last_activity) < *SESSION_TTL_MS);
     }
 
     let session = store
@@ -485,6 +522,7 @@ pub fn add_tool_call_to_session(
 
     let node = ToolCallNode {
         id: node_id,
+        agent_id: agent_id.to_string(),
         tool_name: tool_name.to_string(),
         action_type: action_type.to_string(),
         timestamp: now_ms(),
@@ -507,8 +545,12 @@ pub fn add_tool_call_to_session(
         session.blocked = true;
         session.blocked_at = now_ms();
         session.block_count += 1;
+        // Truthful by construction: this arm fires on the call being evaluated
+        // right now, so the caller IS the actor. The reason string is replayed
+        // verbatim to every later caller in the session and signed into THAT
+        // agent's receipt, so it has to name who it was about.
         session.block_reason = Some(format!(
-            "unauthorized FSA transition: {} → {}",
+            "unauthorized FSA transition: {} → {} (by {agent_id})",
             previous_state, action_type
         ));
     } else {
@@ -525,13 +567,31 @@ pub fn add_tool_call_to_session(
         }
         session.blocked = true;
         session.blocked_at = now_ms();
+        // The CHAIN, not the caller. After a cooldown expires a sibling's
+        // benign call re-enters this arm while every node in the matched chain
+        // still belongs to the original agent, so "whoever called last" names
+        // the wrong actor — and this string is replayed to every later caller
+        // and signed into their receipts. Attributed here, where the actors are
+        // known. Empty when the nodes predate `ToolCallNode::agent_id`:
+        // unattributed, never misattributed.
+        let mut chain: Vec<&str> = attacks
+            .iter()
+            .flat_map(|a| a.agents.iter().map(String::as_str))
+            .collect();
+        chain.sort_unstable();
+        chain.dedup();
         session.block_reason = Some(format!(
-            "attack pattern: {}",
+            "attack pattern: {}{}",
             attacks
                 .iter()
                 .map(|a| a.name.as_str())
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join(", "),
+            if chain.is_empty() {
+                String::new()
+            } else {
+                format!(" (chain by: {})", chain.join(", "))
+            }
         ));
         session.state = FSAState::Blocked;
         transition_allowed = false;
@@ -597,6 +657,7 @@ fn match_attack_signatures(session: &SessionDAG) -> Vec<AttackMatch> {
         for start in 0..=session.nodes.len().saturating_sub(sig.pattern.len()) {
             let mut pat_idx = 0;
             let mut matched_nodes = Vec::new();
+            let mut matched_agents: Vec<String> = Vec::new();
             let mut all_taints = HashSet::new();
 
             for i in start..session.nodes.len() {
@@ -605,6 +666,7 @@ fn match_attack_signatures(session: &SessionDAG) -> Vec<AttackMatch> {
                 }
                 if session.nodes[i].action_type == sig.pattern[pat_idx] {
                     matched_nodes.push(session.nodes[i].id.clone());
+                    matched_agents.push(session.nodes[i].agent_id.clone());
                     for t in &session.nodes[i].taint_labels {
                         all_taints.insert(t.clone());
                     }
@@ -623,12 +685,21 @@ fn match_attack_signatures(session: &SessionDAG) -> Vec<AttackMatch> {
                 }
             }
 
+            // Sorted and deduped because this list is joined into a string
+            // that is signed into a receipt, so it has to be reproducible.
+            // Empty ids come from nodes persisted before `ToolCallNode::agent_id`
+            // and name nobody, so they are dropped rather than printed as "".
+            matched_agents.sort();
+            matched_agents.dedup();
+            matched_agents.retain(|a| !a.is_empty());
+
             let confidence = 0.7 + if sig.severity == "critical" { 0.2 } else { 0.1 };
             matches.push(AttackMatch {
                 name: sig.name.clone(),
                 severity: sig.severity.clone(),
                 confidence,
                 matched_nodes,
+                agents: matched_agents,
             });
             break; // One match per signature
         }
@@ -852,7 +923,9 @@ pub fn get_session_metrics(session_id: &str) -> Option<SessionMetrics> {
         edge_count: s.edges.len(),
         state: s.state,
         taint_labels: taints.into_iter().collect(),
-        duration_ms: s.last_activity - s.created_at,
+        // Same wall clock, same reason: a backward step mid-session puts
+        // `last_activity` before `created_at`.
+        duration_ms: s.last_activity.saturating_sub(s.created_at),
     })
 }
 
@@ -938,5 +1011,77 @@ mod tests {
         assert_eq!(result.session_call_count, 2);
         assert_eq!(result.recent_call_timestamps.len(), 2);
         assert!(result.recent_call_timestamps[0] <= result.recent_call_timestamps[1]);
+    }
+
+    #[test]
+    fn fetch_then_unrelated_shell_keeps_the_session_usable() {
+        let session_id = "session-fetch-then-shell";
+        let network_taints =
+            HashSet::from(["network_response".to_string(), "external_tool".to_string()]);
+
+        let fetch = add_tool_call_to_session(
+            session_id,
+            "agent-fetch",
+            "http.fetch",
+            "http",
+            network_taints.clone(),
+        );
+        assert!(fetch.transition_allowed);
+
+        let shell = add_tool_call_to_session(
+            session_id,
+            "agent-fetch",
+            "shell.exec",
+            "shell",
+            network_taints,
+        );
+        assert!(
+            shell.attacks_detected.is_empty(),
+            "an ordinary fetch followed by an unrelated command is not an attack: {:?}",
+            shell.attacks_detected
+        );
+        assert!(
+            shell.transition_allowed,
+            "network_egress → shell must not block the whole session"
+        );
+
+        let later = add_tool_call_to_session(
+            session_id,
+            "agent-fetch",
+            "fs.readme",
+            "file_read",
+            HashSet::new(),
+        );
+        assert!(later.transition_allowed, "the session must remain usable");
+        assert!(!later.node_id.is_empty(), "the later call must be recorded");
+    }
+
+    #[test]
+    fn fetch_then_shell_still_scores_the_execution_arc() {
+        let session_id = "session-fetch-shell-score";
+        let _ = add_tool_call_to_session(
+            session_id,
+            "agent-score",
+            "http.fetch",
+            "http",
+            HashSet::from(["external_tool".to_string()]),
+        );
+        let shell = add_tool_call_to_session(
+            session_id,
+            "agent-score",
+            "shell.exec",
+            "shell",
+            HashSet::from(["external_tool".to_string()]),
+        );
+
+        assert!(
+            shell
+                .anomaly_reasons
+                .iter()
+                .any(|reason| reason.contains("network-delivered execution arc")),
+            "the sequence must remain visible as risk evidence: {:?}",
+            shell.anomaly_reasons
+        );
+        assert!(shell.anomaly_score >= 25);
     }
 }

@@ -170,12 +170,13 @@ export function verifyExport(exportObj, pinnedKeyHex) {
 
 // --- CLI (mirrors the Rust `iaga-verify` surface and exit codes) ------------
 
-const USAGE = "usage: iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]";
+const USAGE = "usage: iaga-verify <chain.json> [--key <hex-ed25519-pubkey>] [--expect-count <n>]";
 
 /** @param {string[]} argv @returns {number} */
 export function main(argv) {
   let path;
   let key;
+  let expectCount;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--key" || a === "-k") {
@@ -184,6 +185,23 @@ export function main(argv) {
         process.stderr.write("iaga-verify: --key needs a hex public key\n");
         return 2;
       }
+    } else if (a === "--expect-count") {
+      // The one honest defence against tail truncation offline, and it has to
+      // exist here too: README.md offers this verifier as the way to check a
+      // chain with no build at all, and sdks/conformance/README.md promises all
+      // three reach the same verdict with the same exit codes. Shipping the flag
+      // only in the Rust binary made that promise false for exactly the reader
+      // who cannot build Rust. Wording copied from the Rust verifier.
+      const raw = argv[++i];
+      if (raw === undefined) {
+        process.stderr.write("iaga-verify: --expect-count needs a value\n");
+        return 2;
+      }
+      if (!/^\d+$/.test(raw)) {
+        process.stderr.write("iaga-verify: --expect-count needs a non-negative integer\n");
+        return 2;
+      }
+      expectCount = Number(raw);
     } else if (a === "-h" || a === "--help") {
       process.stdout.write(USAGE + "\nVerifies the Ed25519 signatures and hash-chain links of a signed receipt chain.\n");
       return 0;
@@ -226,6 +244,15 @@ export function main(argv) {
     );
   }
   if (res.ok) {
+    if (expectCount !== undefined && res.receiptCount !== expectCount) {
+      process.stderr.write(
+        `CHAIN LENGTH MISMATCH  run_id=${res.runId}  receipts=${res.receiptCount}  expected=${expectCount}  signer=${res.signerKeyId}  key=${res.keySource}\n`,
+      );
+      process.stderr.write(
+        `the chain is internally valid but not the length you anchored: ${res.receiptCount} of ${expectCount} receipts. A shorter valid chain is what tail truncation looks like.\n`,
+      );
+      return 1;
+    }
     const last = Math.max(res.receiptCount - 1, 0);
     process.stdout.write(
       `CHAIN OK  run_id=${res.runId}  receipts=${res.receiptCount}  seq=0..${last}  signer=${res.signerKeyId}  key=${res.keySource}\n`,

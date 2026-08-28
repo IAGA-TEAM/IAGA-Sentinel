@@ -4,7 +4,7 @@
 
 | Version | Supported |
 |---------|-----------|
-| 2.0.x   | Yes       |
+| 2.1.x   | Yes       |
 
 Older lines are not patched. Receipts produced by any earlier release keep
 verifying. The receipt body *has* gained fields since 1.3.0 — `is_authoritative`

@@ -133,3 +133,71 @@ fn validate_does_not_warn_about_destination_fields_once_they_are_declared() {
          the `error` level. stdout was:\n{stdout}"
     );
 }
+
+/// A workspace declaring the same tool twice with conflicting `maxDecision`.
+///
+/// `formal_verify` classifies this `critical`: the policy does not mean one
+/// thing, so there is no verdict it can be said to express.
+const CONTRADICTORY: &str = r#"
+profiles:
+  - agentId: a-01
+    workspaceId: ws-c
+    framework: crewai
+    role: researcher
+    approvedTools: [http.fetch]
+    approvedSecrets: []
+    baselineActionTypes: [http]
+workspaces:
+  - workspaceId: ws-c
+    allowedProtocols: [mcp]
+    allowedDomains: ["api.example.com"]
+    tools:
+      - toolName: http.fetch
+        allowedActionTypes: [http]
+        maxDecision: allow
+        destinationFields: [url]
+      - toolName: http.fetch
+        allowedActionTypes: [http]
+        maxDecision: block
+        destinationFields: [url]
+"#;
+
+/// A contradiction is not something to print under a "valid" headline.
+///
+/// Measured before the fix: `validate` printed `Config is valid!` as its first
+/// line and `error [critical] contradiction` several lines below it, then exited
+/// 0 — so a CI gate reading the exit code accepted a policy that does not mean
+/// one thing, and a human reading the first line was told the opposite of the
+/// truth. `iaga import` then imported it, also with exit 0.
+///
+/// `high`/`medium` lints stay advisory (the two tests above pin that): a policy
+/// that has not adopted `destinationFields` is legal. `critical` is different —
+/// it is the level `formal_verify` reserves for a policy with no single meaning.
+#[test]
+fn a_contradictory_policy_is_not_reported_as_valid() {
+    let (code, stdout) = validate(CONTRADICTORY);
+
+    assert!(
+        stdout.contains("critical"),
+        "the linter must still report the contradiction: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Config is valid!"),
+        "a config with a critical contradiction must not be headlined valid: {stdout}"
+    );
+    assert_ne!(
+        code, 0,
+        "a CI gate reads the exit code; a contradiction must not pass it. stdout: {stdout}"
+    );
+}
+
+/// And a clean config still says so, with exit 0.
+#[test]
+fn a_clean_policy_is_still_reported_as_valid_with_exit_zero() {
+    let (code, stdout) = validate(DECLARED);
+    assert_eq!(code, 0, "a clean config must pass: {stdout}");
+    assert!(
+        stdout.contains("Config is valid!"),
+        "a clean config must still be headlined valid: {stdout}"
+    );
+}

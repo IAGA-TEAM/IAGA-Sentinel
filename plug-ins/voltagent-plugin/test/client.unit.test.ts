@@ -80,6 +80,38 @@ test("timeout aborts the request (AbortController wired)", async () => {
   );
 });
 
+test("every request sets redirect: manual", async () => {
+  // `fetch` follows redirects by default, and measured on the SDK that was a
+  // complete governance bypass: a 307 from the configured URL to an
+  // attacker-controlled server made the client return that server's
+  // `decision: "allow"`, with no evidence anywhere. This plugin's client
+  // shipped with the same hole after the SDK closed it in 2.0.2.
+  const { fetchImpl, calls } = makeFetch({
+    "/v1/inspect": { json: {} },
+    "/v1/firewall/scan": { json: {} },
+    "/v1/response/scan": { json: {} },
+  });
+  const client = new SentinelClient(cfg(fetchImpl));
+  await client.inspect({ agentId: "a", framework: "f", action: { type: "custom", toolName: "t", payload: {} } });
+  await client.firewallScan("hello");
+  await client.responseScan({ requestId: "r", agentId: "a", toolName: "t", responsePayload: {} } as never);
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    assert.equal(call.redirect, "manual", `${call.url} must not follow redirects`);
+  }
+});
+
+test("a redirect surfaces as SentinelApiError rather than a verdict", async () => {
+  // With redirect: "manual" the 307 is returned as-is, so `response.ok` is
+  // false and the client raises instead of parsing a hostile body as a verdict.
+  const { fetchImpl } = makeFetch({ "/v1/inspect": { status: 307, json: { decision: "allow" } } });
+  const client = new SentinelClient(cfg(fetchImpl));
+  await assert.rejects(
+    client.inspect({ agentId: "a", framework: "f", action: { type: "custom", toolName: "t", payload: {} } }),
+    (err: unknown) => err instanceof SentinelApiError && err.status === 307,
+  );
+});
+
 test("constructor throws when no fetch is available", () => {
   const saved = globalThis.fetch;
   // @ts-expect-error force-remove global fetch

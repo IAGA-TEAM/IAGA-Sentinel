@@ -243,7 +243,7 @@ docker run -p 127.0.0.1:4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
 > **No published image exists.** `ghcr.io/iaga-team/iaga-sentinel` does not resolve — the package is
 > private and the tag push 403s at manifest time (see `.github/workflows/docker.yml`). Build it, or
 > use `cargo install --git` (section 5). Do not send anyone to
-> `ghcr.io/edoardobambini/...:v1.8.1`: it is six releases behind.
+> `ghcr.io/edoardobambini/...:v1.8.1`: it is seven releases behind.
 
 That is the whole loop. The rest of this file explains every moving part so an agent can do it
 without the demo scripts, wire in its own framework, add auth, or debug.
@@ -280,7 +280,7 @@ not describe it as a "gateway."
 
 ```
 iaga-sentinel/                      # repo root (project name: IAGA Sentinel)
-├── Cargo.toml                    # workspace root (9 crates), version 2.0.2, MSRV 1.88, BUSL-1.1
+├── Cargo.toml                    # workspace root (9 crates), version 2.1.0, MSRV 1.88, BUSL-1.1
 ├── Cargo.lock
 ├── Dockerfile                    # 2-stage build; no image published yet (see 16)
 ├── docker-compose.yml            # server + 2 named volumes (data + signer keys)
@@ -365,7 +365,7 @@ Notes:
 Install from git instead of building locally:
 
 ```bash
-cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.0.2 --locked \
+cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.1.0 --locked \
   iaga-sentinel-core iaga-sentinel-verify
 ```
 
@@ -551,7 +551,7 @@ printf '%s\n' \
  | DATABASE_URL="sqlite:iaga_shared.db?mode=rwc" iaga mcp-server --policy agent_rules.dictum
 ```
 
-Expected: `initialize` → `serverInfo iaga-sentinel 2.0.2`; `tools/list` → `[iaga.inspect,
+Expected: `initialize` → `serverInfo iaga-sentinel 2.1.0`; `tools/list` → `[iaga.inspect,
 iaga.response_scan]`; the `iaga.inspect` call → `structuredContent.decision = "block"`, `risk.score
 81`, `isError:false` (the verdict rides *inside* the result — enforcement is cooperative, you honor
 it). The call also writes a signed receipt and, because of the shared `DATABASE_URL`, shows up live
@@ -569,8 +569,11 @@ in the dashboard at `http://localhost:4010/`.
 > **workspace policy** — `destinationFields` on the tool, which is fail-closed by design — not in a
 > Dictum rule. An
 > `intent` string is **recommended** (it
-> enriches the receipt) but is **advisory** — it no longer forces a block when missing. An unknown tool
-> name, or a missing *structural* field, still fails schema validation and blocks.
+> enriches the receipt) but is **advisory** — it no longer forces a block when missing. A missing
+> *structural* field on a KNOWN tool still fails schema validation and blocks. An unknown tool name
+> no longer does: the gap is reported as an advisory finding (`schemaValidation.valid` stays `true`)
+> and the workspace tool registry refuses it instead — so when you debug that refusal, read
+> `risk.reasons`, not `schemaValidation`.
 
 **Register it in an MCP client** (Claude Desktop `claude_desktop_config.json`, Cursor
 `~/.cursor/mcp.json`, same shape):
@@ -609,8 +612,27 @@ through.
 
 - Bearer token in `Authorization: Bearer <key>`. Keys are hashed with Argon2id. Raw key format:
   `iaga_<uuid-no-dashes>`.
-- Two scopes: **`admin`** (everything) and **`agent`** (governance surface: `/v1/inspect`, cost, etc.).
+- Two scopes: **`admin`** (everything) and **`agent`** (governance surface as one bound identity:
+  `/v1/inspect`, cost, etc.).
   Admin-only routes return `403 admin_scope_required` for `agent` keys.
+- **An `agent` key names exactly one agent (2.1.0).** `agentId` is required when you create one, and
+  the server refuses any HTTP request that asserts a different identity with
+  `403 agent_scope_mismatch`.
+  > **Scope:** this is an HTTP-layer control, because the thing it binds is an API key. The stdio
+  > MCP planes — `iaga mcp-server` and `iaga proxy` — present no key and therefore carry no binding:
+  > whoever can run the binary can submit any `agentId` and get a signed receipt for it. Unchanged
+  > from 2.0.2, and inherent to stdio, which has no transport to authenticate on. If an agent's
+  > identity has to be enforced rather than asserted, put it on the HTTP surface with a bound key.
+  > **Trap:** every `agent`-scoped key created before 2.1.0 has a **null** binding and fails closed
+  > with `403 agent_key_unbound` until it is rotated. After the database migrates, mint replacements
+  > with an explicit identity (`iaga gen-key --scope agent --agent-id <id>`, or `agentId` in
+  > `POST /v1/auth/keys`) and revoke the old ones. Finish the rollout first: a still-running 2.0.2
+  > process does not enforce the new column.
+- The four per-agent reads — `GET /v1/profiles/{id}`, `/v1/analytics/agents/{id}`,
+  `/v1/fingerprint/{id}`, `/v1/rate-limit/status/{id}` — are admin-only unless the caller presents a
+  `read:self` capability token for **its own** id in `X-IAGA-Capability-Token`. Asking for your own
+  without one answers `403 capability_required`; asking for someone else's answers
+  `403 agent_scope_mismatch` and never looks at the token.
 - **Open mode:** `IAGA_SENTINEL_OPEN_MODE=true` — while **no keys exist**, requests pass as implicit
   admin. This is the demo/local default. With open mode **off** and no keys, every route is `401`.
   > **Trap:** open mode is auth-optional *only while zero keys exist*. The moment you run
@@ -628,7 +650,9 @@ through.
    ```
 2. **Env var at startup:** set `IAGA_SENTINEL_BOOTSTRAP_API_KEY=<>=16 printable ASCII chars>` before
    `serve`; it is registered as an **admin** key on boot (idempotent). Invalid value → server exits(2).
-3. **HTTP (needs an existing admin):** `POST /v1/auth/keys` with `{ "label": "...", "scope": "admin|agent" }`.
+3. **HTTP (needs an existing admin):** `POST /v1/auth/keys` with
+   `{ "label": "...", "scope": "admin" }`, or add the required
+   `{ "agentId": "my-agent" }` when the scope is `agent`.
 
 ---
 
@@ -682,7 +706,7 @@ Global: `--db <url>`. Subcommands (some behind feature flags):
 | `validate <config>` | Validate a policy YAML/JSON without starting. |
 | `import <config>` / `export [--output]` | Policies ↔ DB. |
 | `migrate` | Run DB migrations. |
-| `gen-key [--label] [--scope admin\|agent]` | Mint an API key (prints once). |
+| `gen-key [--label] [--scope admin\|agent] [--agent-id ID]` | Mint an API key (agent scope requires `--agent-id`; prints once). |
 | `audit [--limit] [--format json\|table]` | Dump the audit log. |
 | `cost [summary\|by-model\|by-agent\|by-tool\|budget] [--from --to --limit]` | Cost reporting (`cost-control`). |
 | `replay [run_id] [--verify-only] [--list] [--limit] [--re-execute] [--export <file>]` | Receipt replay/export (`receipts`). `run_id` is `<agentId>:<sessionId>` — `--list` shows the real ones. **`--export` exits 3 and writes nothing if the run has no receipts** (2.0.1; it used to write an empty-but-authentic file and exit 0). SQLite only. |
@@ -975,13 +999,33 @@ Routes: `crates/iaga-sentinel-core/src/server/create_server.rs`. Full spec: `doc
 - **Receipts:** `GET /v1/receipts`, `GET /v1/receipts/{run_id}` (admin).
 - **Audit/analytics:** `/v1/audit`, `/v1/audit/export?format=json|csv`, `/v1/audit/stats`,
   `/v1/analytics/agents[/{id}]`.
+- **Reviews (admin):** `GET /v1/reviews` (the human-in-the-loop queue),
+  `POST /v1/reviews/{id}` (resolve one — a mutation; it publishes `ReviewResolved`
+  and the console shows the entry as settled by a human).
 - **Admin (require admin scope):** profiles/workspaces CRUD, `/v1/auth/keys`, `/v1/webhooks` (+DLQ),
-  threat-intel, rate-limit config, risk weights, plugins reload, workspace rules.
-- **8-layer surfaces:** `/v1/sessions`, `/v1/nhi/*`, `/v1/risk/*`, `/v1/sandbox/*`,
-  `/v1/policy/verify/*`, `/v1/firewall/*`, `/v1/telemetry/*`, `/v1/fingerprint*`, `/v1/threat-intel/*`.
+  threat-intel, rate-limit config, risk weights, plugins reload, workspace rules (read AND write).
+- **Cross-agent reads, admin since 2.1.0:** `/v1/nhi/identities`, `/v1/sessions[/{id}/metrics]`,
+  `/v1/fingerprint`, `/v1/sandbox/pending`, `/v1/cost/by-agent`, `/v1/telemetry/spans|metrics|export`
+  and `GET /v1/policy/verify/{id}`. The telemetry buffer carries `agent.id`, `tool.name`,
+  `governance.decision` and `risk.score` per governed action, which is the SSE firehose by another
+  name — hence the same guard.
+- **Capability tokens (2.1.0):** `GET /v1/nhi/tokens` (what is outstanding, signatures withheld),
+  `POST /v1/nhi/tokens` and `DELETE /v1/nhi/tokens/{id}` are admin. Minting needs the agent to have
+  an NHI identity: a profile and an agent-scoped key are not enough, and without one the mint answers
+  `404`. The agent's first governed action creates it, or register it with `POST /v1/nhi/identities`.
+  A token is presented in the
+  `X-IAGA-Capability-Token` header; `read:self` opens an agent's OWN
+  `/v1/profiles/{id}`, `/v1/analytics/agents/{id}`, `/v1/fingerprint/{id}` and
+  `/v1/rate-limit/status/{id}`, which are otherwise admin.
+- **8-layer surfaces:** `/v1/risk/*` reads (`POST /v1/risk/feedback` is admin),
+  `/v1/firewall/*`, `/v1/threat-intel/*` reads,
+  `POST /v1/nhi/attest|challenge|verify` (an agent key is restricted to its bound identity). The rest of `/v1/sessions`, `/v1/sandbox/*`,
+  `/v1/telemetry/*`, `/v1/fingerprint*` and `/v1/policy/verify/*` are listed above as admin.
 - **Status:** `/v1/policy/overlay`, `/v1/reasoning/status`, `/v1/kernel/status`.
-- **Live feed (SSE):** `GET /v1/events/stream` (drives the dashboard).
-- **Demo:** `GET /v1/demo/scenarios`, `POST /v1/demo/run-adapter`.
+- **Live feed (SSE):** `GET /v1/events/stream` — admin since 2.1.0 (drives the dashboard, which
+  sends an admin token for every call).
+- **Demo:** `GET /v1/demo/scenarios`; `POST /v1/demo/run-adapter` is admin because one run submits
+  several seeded agent identities.
 
 ---
 
@@ -1166,4 +1210,4 @@ records what was decided either way.
 
 ---
 
-*IAGA Sentinel v2.0.2 · BUSL-1.1 · https://github.com/IAGA-TEAM/IAGA-Sentinel*
+*IAGA Sentinel v2.1.0 · BUSL-1.1 · https://github.com/IAGA-TEAM/IAGA-Sentinel*

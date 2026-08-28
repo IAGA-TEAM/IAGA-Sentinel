@@ -132,6 +132,13 @@ export interface SentinelClientOptions {
   baseUrl?: string;
   apiKey?: string;
   timeout?: number;
+  /**
+   * A capability token minted by `issueToken`, sent as
+   * `X-IAGA-Capability-Token`. Required to read the admin-or-self routes
+   * (`/v1/profiles/{id}`, `/v1/analytics/agents/{id}`, `/v1/fingerprint/{id}`,
+   * `/v1/rate-limit/status/{id}`) with an agent-scoped key.
+   */
+  capabilityToken?: string;
 }
 
 export interface OpenAIAdapterOptions extends SentinelClientOptions {

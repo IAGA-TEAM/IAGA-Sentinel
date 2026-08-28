@@ -62,6 +62,43 @@ pub struct DbOperation {
 static PENDING: Lazy<Mutex<HashMap<String, SandboxResult>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+// Bounded, like every comparable process-global in this codebase
+// (`session_dag`'s MAX_SESSIONS + SESSION_TTL_MS, `taint_tracker`'s
+// `prune_stale_agents`). PENDING only ever shrank when an admin called
+// approve/reject, so an agent that keeps tripping `should_sandbox` grew it by
+// one full `SandboxResult` per call, forever, with no operator action short of
+// a restart able to bound it. Same env-var + TTL shape as its siblings; the
+// defaults are deliberately generous, since evicting a genuine approval request
+// loses an operator's queue entry.
+static MAX_PENDING: Lazy<usize> =
+    Lazy::new(|| crate::config::env::env_parse("IAGA_SENTINEL_MAX_SANDBOX_PENDING", 1_000usize));
+static PENDING_TTL_MS: Lazy<u64> = Lazy::new(|| {
+    crate::config::env::env_parse(
+        "IAGA_SENTINEL_SANDBOX_PENDING_TTL_MS",
+        24 * 60 * 60 * 1000u64,
+    )
+});
+
+/// Drop approval requests older than `ttl_ms`. Returns how many went.
+///
+/// `SandboxResult::timestamp` is already ms-since-epoch, so no new field is
+/// needed. Called from the periodic cleanup task, which pruned taint, session
+/// DAGs, NHI challenges and the rate limiter but never this map.
+pub fn prune_stale_pending(ttl_ms: u64) -> usize {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    let now = now_ms();
+    let before = pending.len();
+    // saturating: `timestamp` is wall-clock and can sit in the future after a
+    // clock step, which must not evict a live entry (or panic in debug).
+    pending.retain(|_, r| now.saturating_sub(r.timestamp) < ttl_ms);
+    before - pending.len()
+}
+
+/// The TTL the cleanup task should use when the operator has not set one.
+pub fn pending_ttl_ms() -> u64 {
+    *PENDING_TTL_MS
+}
+
 // ponytail: a `COMPLETED` map used to sit here. `get_sandbox_result` was its
 // only reader and had no call sites, so removing that function left an
 // unbounded process-global map that was written on every completed, approved
@@ -166,16 +203,54 @@ fn analyze_shell(command: &str) -> ImpactAnalysis {
     }
 }
 
+/// Word-boundary matchers for the four mutating statements.
+///
+/// Substring matching on the uppercased query read `deleted_at`, `dropbox_url`,
+/// `updated_at` and `alternate_id` as DELETE/DROP/UPDATE/ALTER, so an ordinary
+/// `SELECT ... WHERE deleted_at IS NULL` was reported as a critical,
+/// irreversible DELETE. That changes no verdict, score or receipt byte -- the
+/// composite risk formula has no sandbox term (`layer_roles`) -- but it decides
+/// `requires_approval`, so it filled the human approval queue and the console
+/// with destructive-looking entries for read-only reads.
+///
+/// Built like `SHELL_CHECKS` above, with `filter_map` so an unparseable pattern
+/// is dropped rather than panicking at first use. `(?i)` here because these are
+/// matched against the raw query, not the uppercased copy.
+static DB_STATEMENTS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+    [
+        ("DELETE", r"(?i)\bDELETE\b"),
+        ("DROP", r"(?i)\bDROP\b"),
+        ("UPDATE", r"(?i)\bUPDATE\b"),
+        ("ALTER", r"(?i)\bALTER\b"),
+    ]
+    .into_iter()
+    .filter_map(|(name, pat)| Regex::new(pat).ok().map(|re| (name, re)))
+    .collect()
+});
+
+static DB_WHERE: Lazy<Option<Regex>> = Lazy::new(|| Regex::new(r"(?i)\bWHERE\b").ok());
+
+/// Whether `query` contains `statement` as a whole SQL keyword.
+fn has_statement(query: &str, statement: &str) -> bool {
+    DB_STATEMENTS
+        .iter()
+        .find(|(name, _)| *name == statement)
+        .is_some_and(|(_, re)| re.is_match(query))
+}
+
+fn has_where(query: &str) -> bool {
+    DB_WHERE.as_ref().is_some_and(|re| re.is_match(query))
+}
+
 fn analyze_db(query: &str) -> (ImpactAnalysis, Vec<DbOperation>) {
     let mut ops = Vec::new();
     let mut details = Vec::new();
     let mut severity = "low".to_string();
     let mut reversible = true;
     let mut total_rows: u64 = 0;
-    let upper = query.to_uppercase();
 
-    if upper.contains("DELETE") {
-        let rows = if upper.contains("WHERE") { 100 } else { 10000 };
+    if has_statement(query, "DELETE") {
+        let rows = if has_where(query) { 100 } else { 10000 };
         total_rows += rows;
         severity = if rows > 100 {
             "critical".into()
@@ -191,7 +266,7 @@ fn analyze_db(query: &str) -> (ImpactAnalysis, Vec<DbOperation>) {
             reversible: false,
         });
     }
-    if upper.contains("DROP") {
+    if has_statement(query, "DROP") {
         severity = "critical".into();
         reversible = false;
         details.push("DROP TABLE: entire table destroyed".into());
@@ -202,8 +277,8 @@ fn analyze_db(query: &str) -> (ImpactAnalysis, Vec<DbOperation>) {
             reversible: false,
         });
     }
-    if upper.contains("UPDATE") {
-        let rows = if upper.contains("WHERE") { 100 } else { 10000 };
+    if has_statement(query, "UPDATE") {
+        let rows = if has_where(query) { 100 } else { 10000 };
         total_rows += rows;
         severity = if rows > 1000 {
             "high".into()
@@ -218,7 +293,7 @@ fn analyze_db(query: &str) -> (ImpactAnalysis, Vec<DbOperation>) {
             reversible: true,
         });
     }
-    if upper.contains("ALTER") {
+    if has_statement(query, "ALTER") {
         severity = "high".into();
         reversible = false;
         details.push("ALTER TABLE: schema modification".into());
@@ -399,10 +474,33 @@ pub fn sandbox_execute(
     // Only work awaiting a human is retained; a completed sandbox is returned
     // to the caller and not stored (see the note on the removed COMPLETED map).
     if requires_approval {
-        PENDING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(execution_id, result.clone());
+        let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        // Evict expired entries before enforcing the cap, so a full map does not
+        // start refusing new approval requests while holding stale ones.
+        if pending.len() >= *MAX_PENDING {
+            let now = now_ms();
+            pending.retain(|_, r| now.saturating_sub(r.timestamp) < *PENDING_TTL_MS);
+        }
+        // Still full: drop the OLDEST rather than refuse the newest, so the
+        // queue keeps tracking what the agent is doing now. Logged, because
+        // silently discarding something a human was meant to see is exactly the
+        // failure this map exists to prevent.
+        if pending.len() >= *MAX_PENDING {
+            if let Some(oldest) = pending
+                .values()
+                .min_by_key(|r| r.timestamp)
+                .map(|r| r.execution_id.clone())
+            {
+                tracing::warn!(
+                    max_pending = *MAX_PENDING,
+                    evicted = %oldest,
+                    "sandbox approval queue is full; evicting the oldest entry. \
+                     Raise IAGA_SENTINEL_MAX_SANDBOX_PENDING or drain the queue."
+                );
+                pending.remove(&oldest);
+            }
+        }
+        pending.insert(execution_id, result.clone());
     }
 
     result

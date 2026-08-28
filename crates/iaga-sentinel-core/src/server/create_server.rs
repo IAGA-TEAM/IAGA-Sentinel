@@ -16,7 +16,9 @@ use uuid::Uuid;
 use crate::auth::api_keys::generate_api_key;
 use crate::auth::middleware::auth_middleware;
 use crate::auth::middleware::is_open_mode_enabled;
-use crate::auth::middleware::RequireAdmin;
+use crate::auth::middleware::{
+    authorize_agent_scope, AuthContext, CapabilityTokenHeader, RequireAdmin,
+};
 use crate::core::errors::SentinelError;
 use crate::core::types::*;
 use crate::dashboard::index_html::render_dashboard_html;
@@ -59,14 +61,18 @@ struct CreateApiKeyBody {
     /// (governance surface only).
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default, rename = "agentId")]
+    agent_id: Option<String>,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ApiKeyCreated {
     id: String,
     key: String,
     label: String,
     scope: String,
+    agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +152,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/nhi/challenge", post(create_challenge_handler))
         .route("/v1/nhi/verify", post(verify_attestation_handler))
         .route("/v1/nhi/tokens", post(issue_token_handler))
+        .route("/v1/nhi/tokens", get(list_tokens_handler))
+        .route("/v1/nhi/tokens/{token_id}", delete(revoke_token_handler))
         // L4: Risk Scoring
         .route("/v1/risk/weights", get(risk_weights_handler))
         .route("/v1/risk/weights/reset", post(risk_weights_reset_handler))
@@ -242,7 +250,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .merge(protected)
         .layer(axum_middleware::from_fn(request_logging_middleware))
         .layer({
-            use axum::http::{header, HeaderValue, Method};
+            use axum::http::{header, HeaderName, HeaderValue, Method};
             use tower_http::cors::AllowOrigin;
 
             // `IAGA_SENTINEL_CORS_ORIGINS` (comma-separated) restricts CORS to
@@ -265,7 +273,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             CorsLayer::new()
                 .allow_origin(allow_origin)
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+                // `x-iaga-capability-token` is the documented way for an
+                // agent-scoped caller to read its own record, so a browser has
+                // to be allowed to send it -- without this the header is
+                // stripped at preflight and the remedy works only from curl.
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::AUTHORIZATION,
+                    HeaderName::from_static(crate::auth::middleware::CAPABILITY_TOKEN_HEADER),
+                ])
         })
         .with_state(state)
 }
@@ -298,12 +314,27 @@ async fn request_logging_middleware(request: Request, next: axum::middleware::Ne
         response.headers_mut().insert(REQUEST_ID_HEADER, header);
     }
 
+    // WHICH KEY made this request. Read from the RESPONSE extensions because
+    // this middleware is the OUTER layer: it runs first inbound, before
+    // `auth_middleware` has put anything in the request, and the request is
+    // gone by the time it has. `AuthContext::run` leaves the copy here for
+    // exactly this line.
+    //
+    // `-` rather than a name when there is none: open mode, an unauthenticated
+    // route, or a rejected request that never reached auth. Never guessed.
+    let key_id = response
+        .extensions()
+        .get::<crate::auth::middleware::AuthContext>()
+        .and_then(|ctx| ctx.key_id.clone())
+        .unwrap_or_else(|| "-".to_string());
+
     if status.is_server_error() {
         tracing::error!(
             request_id = %request_id,
             method = %method,
             path = %path,
             status = status.as_u16(),
+            key_id = %key_id,
             elapsed_ms,
             "http request completed"
         );
@@ -313,6 +344,7 @@ async fn request_logging_middleware(request: Request, next: axum::middleware::Ne
             method = %method,
             path = %path,
             status = status.as_u16(),
+            key_id = %key_id,
             elapsed_ms,
             "http request completed"
         );
@@ -322,6 +354,7 @@ async fn request_logging_middleware(request: Request, next: axum::middleware::Ne
             method = %method,
             path = %path,
             status = status.as_u16(),
+            key_id = %key_id,
             elapsed_ms,
             "http request completed"
         );
@@ -359,9 +392,11 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
 // ── Core Pipeline ──
 
 async fn inspect_handler(
+    auth: AuthContext,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<InspectRequest>,
 ) -> Result<impl IntoResponse, SentinelError> {
+    auth.authorize_agent_id(&payload.agent_id)?;
     let result = execute_pipeline(&payload, &state).await?;
 
     tracing::info!(
@@ -410,11 +445,43 @@ struct AuditExportQuery {
     limit: Option<u32>,
 }
 
+/// RFC 4180 quoting for one CSV field.
+///
+/// The export interpolated every field straight into the row, and `agent_id`,
+/// `framework` and `tool_name` are free-form strings taken from the caller's
+/// `/v1/inspect` body and from `POST /v1/profiles` — so an agent, including a
+/// hostile one, chooses their contents. A comma shifted every later column, a
+/// bare quote broke the field, and a newline split one audit record into two
+/// rows, the second of which parses as a whole event with a fabricated
+/// `event_id`. Measured on a live 2.1.0 export: 5 of 33 records malformed.
+///
+/// ponytail: the rule is four lines. A csv crate for one writer is a
+/// dependency for nothing.
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
 async fn audit_export_handler(
     _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(query): axum::extract::Query<AuditExportQuery>,
 ) -> Result<impl IntoResponse, SentinelError> {
+    // An empty value is equivalent to the documented JSON default.
+    let requested_format = query
+        .format
+        .as_deref()
+        .filter(|format| !format.is_empty())
+        .unwrap_or("json");
+    if requested_format != "json" && requested_format != "csv" {
+        return Err(SentinelError::InvalidRequest(format!(
+            "unsupported format `{requested_format}`: expected `json` or `csv`"
+        )));
+    }
+
     let filter = AuditExportFilter {
         tenant_id: query.tenant_id,
         agent_id: query.agent_id,
@@ -426,8 +493,8 @@ async fn audit_export_handler(
 
     let events = state.audit_store.list_filtered(&filter).await?;
 
-    match query.format.as_deref() {
-        Some("csv") => {
+    match requested_format {
+        "csv" => {
             let mut csv = String::from("event_id,agent_id,framework,action_type,tool_name,decision,risk_score,review_status,timestamp\n");
             for e in &events {
                 let at = serde_json::to_value(e.action_type)
@@ -447,15 +514,15 @@ async fn audit_export_handler(
                     .to_string();
                 csv.push_str(&format!(
                     "{},{},{},{},{},{},{},{},{}\n",
-                    e.event_id,
-                    e.agent_id,
-                    e.framework,
-                    at,
-                    e.tool_name,
-                    dec,
+                    csv_field(&e.event_id),
+                    csv_field(&e.agent_id),
+                    csv_field(&e.framework),
+                    csv_field(&at),
+                    csv_field(&e.tool_name),
+                    csv_field(&dec),
                     e.risk_score,
-                    rs,
-                    e.timestamp
+                    csv_field(&rs),
+                    csv_field(&e.timestamp)
                 ));
             }
             Ok(([(axum::http::header::CONTENT_TYPE, "text/csv")], csv).into_response())
@@ -474,17 +541,37 @@ async fn audit_stats_handler(
 
 // ── Analytics ──
 
+/// Reads across every agent in the store, so it is the same cross-tenant read
+/// that `RequireAdmin` already guards on `/v1/audit` (issue #18). The write
+/// halves of the governance surface were gated then; these read halves were
+/// never reviewed and stayed open to any agent-scoped key.
 async fn analytics_agents_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<AgentAnalytics>>, SentinelError> {
     let analytics = state.audit_store.agent_analytics(None).await?;
     Ok(Json(analytics))
 }
 
+/// Admin, OR an agent reading its OWN analytics with a capability token.
+///
+/// The per-agent reads became admin-only in 2.1.0, which left an agent no way
+/// to see its own governance record. `read:self` is exactly that access, and
+/// the token is bound to one `agent_id`, so it cannot widen into another's.
 async fn analytics_agent_handler(
+    capability: CapabilityTokenHeader,
     State(state): State<Arc<AppState>>,
+    request_parts: axum::http::Extensions,
     Path(agent_id): Path<String>,
 ) -> Result<Json<Vec<AgentAnalytics>>, SentinelError> {
+    authorize_agent_scope(
+        &state,
+        &request_parts,
+        &capability,
+        &agent_id,
+        crypto_identity::CAP_READ_SELF,
+    )
+    .await?;
     let analytics = state.audit_store.agent_analytics(Some(&agent_id)).await?;
     Ok(Json(analytics))
 }
@@ -492,14 +579,25 @@ async fn analytics_agent_handler(
 // ── Reviews ──
 
 async fn reviews_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ReviewRequest>>, SentinelError> {
     let reviews = state.review_store.list().await?;
     Ok(Json(reviews))
 }
 
+/// Resolving a review is an operator decision, exactly like releasing a
+/// sandboxed action (`sandbox_approve_handler`). Without this guard an
+/// agent-scoped key could list the queue, find the ReviewRequest raised against
+/// its own action, and mark it `approved`. That does not release the execution -
+/// nothing re-reads the status - but it publishes `ReviewResolved` on the event
+/// bus and the console then shows the entry as settled by a human. For a product
+/// whose deliverable is the evidence record, falsifying the human-in-the-loop
+/// trail is the whole injury.
 async fn review_action_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
+    extensions: axum::http::Extensions,
     Path(id): Path<String>,
     Json(body): Json<ReviewBody>,
 ) -> Result<Json<ReviewRequest>, SentinelError> {
@@ -508,6 +606,93 @@ async fn review_action_handler(
         ReviewAction::Rejected => "rejected",
     };
     let updated = state.review_store.update_status(&id, status_str).await?;
+
+    // Open mode, and legacy `ApiKeyStore` impls that only report a boolean
+    // match, carry no key id. Record that rather than inventing an actor.
+    let actor = extensions
+        .get::<crate::auth::middleware::AuthContext>()
+        .and_then(|ctx| ctx.key_id.clone())
+        .unwrap_or_else(|| "unattributed".to_string());
+    let resolved_json = serde_json::to_string(&updated).unwrap_or_default();
+    let resolution = StoredAuditEvent {
+        event_id: Uuid::new_v4().to_string(),
+        agent_id: updated.agent_id.clone(),
+        // `review_requests` HAS a `tenant_id` column on both backends
+        // (migrations/{sqlite,postgres}/0001_initial.sql:27) and nothing has
+        // ever written it: `ReviewRequest` has no such field and the pipeline's
+        // INSERT lists ten columns without it, so it is NULL on every row.
+        // Nothing to copy, and recovering it would mean re-reading the agent
+        // profile and half-implementing the pipeline's
+        // `profile.tenant_id.or(workspace.tenant_id)` rule. Consequence, stated:
+        // `/v1/audit/export?tenant_id=X` returns the governed action and NOT
+        // this adjudication.
+        tenant_id: None,
+        framework: "review-resolution".to_string(),
+        action_type: ActionType::Custom,
+        tool_name: updated.tool_name.clone(),
+        // Binds the resolved request itself — id, outcome, resolution time, the
+        // reasons the human was shown — into the receipt's input hash.
+        input_sha256: hex::encode(Sha256::digest(resolved_json.as_bytes())),
+        // The human's answer on the same scale as every other row: an approval
+        // says the action may proceed, a rejection says it may not.
+        decision: match body.status {
+            ReviewAction::Approved => GovernanceDecision::Allow,
+            ReviewAction::Rejected => GovernanceDecision::Block,
+        },
+        timestamp: updated.updated_at.clone(),
+        reasons: vec![
+            format!("review-resolved:{status_str}"),
+            // A ReviewRequest's id IS the `event_id` of the action that opened
+            // it, so this line joins the two rows in an export. Requests opened
+            // before that change carry an unrelated UUID and simply do not join
+            // — which is why this names the REQUEST and does not claim an event
+            // by that id exists.
+            format!("review-request:{id}"),
+            format!("resolved-by:{actor}"),
+        ],
+        review_status: match body.status {
+            ReviewAction::Approved => ReviewStatus::Approved,
+            ReviewAction::Rejected => ReviewStatus::Rejected,
+        },
+        // COPIED from the request being adjudicated, not measured here: no
+        // action was governed at this instant. Kept rather than zeroed because
+        // 0 would assert "no risk" inside the signed receipt, and the receipt
+        // body has no framework/tool field — `reasons[0]` is the only thing in
+        // it that says this is an adjudication.
+        risk_score: updated.risk_score,
+        usage: None,
+        session_id: None,
+    };
+    if let Err(e) = state.audit_store.append(&resolution).await {
+        tracing::error!(
+            event_id = %resolution.event_id,
+            review_id = %id,
+            error = %e,
+            "failed to persist review-resolution audit event"
+        );
+    }
+    if let Some(rl) = state.receipts.as_ref() {
+        // Not `?`, unlike every other `record` call site: this one cannot honour
+        // `IAGA_SENTINEL_RECEIPT_FAIL_CLOSED`. Fail-closed means "no verdict
+        // without evidence", and the verdict here is already committed —
+        // `update_status` is terminal and cannot be rolled back — so a 500 would
+        // tell the operator their resolution failed when it stands.
+        if let Err(e) = rl
+            .record(
+                &resolution,
+                None,
+                None,
+                crate::pipeline::receipts::ReceiptContext {
+                    policy_hash: None,
+                    threat_feed_hash: None,
+                    dictum_trace: None,
+                },
+            )
+            .await
+        {
+            tracing::error!(review_id = %id, error = %e, "review-resolution receipt not recorded");
+        }
+    }
 
     // Emit review resolved event
     state.event_bus.publish(SentinelEvent::ReviewResolved {
@@ -521,6 +706,7 @@ async fn review_action_handler(
 // ── Profiles CRUD ──
 
 async fn list_profiles_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<AgentProfile>>, SentinelError> {
     let profiles = state.policy_store.list_profiles().await?;
@@ -528,9 +714,19 @@ async fn list_profiles_handler(
 }
 
 async fn get_profile_handler(
+    capability: CapabilityTokenHeader,
     State(state): State<Arc<AppState>>,
+    request_parts: axum::http::Extensions,
     Path(agent_id): Path<String>,
 ) -> Result<Json<AgentProfile>, SentinelError> {
+    authorize_agent_scope(
+        &state,
+        &request_parts,
+        &capability,
+        &agent_id,
+        crypto_identity::CAP_READ_SELF,
+    )
+    .await?;
     let profile = state.policy_store.get_agent_profile(&agent_id).await?;
     Ok(Json(profile))
 }
@@ -555,7 +751,12 @@ async fn delete_profile_handler(
 
 // ── Workspaces CRUD ──
 
+/// The highest-value read of the set: a workspace policy carries
+/// `threshold_block`, `threshold_review` and `allowed_domains`, so an
+/// agent-scoped key that can read it learns the exact score at which it gets
+/// blocked and can trim itself to `threshold_block - 1`.
 async fn list_workspaces_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<WorkspacePolicy>>, SentinelError> {
     let workspaces = state.policy_store.list_workspaces().await?;
@@ -563,6 +764,7 @@ async fn list_workspaces_handler(
 }
 
 async fn get_workspace_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<WorkspacePolicy>, SentinelError> {
@@ -578,6 +780,35 @@ async fn upsert_workspace_handler(
     State(state): State<Arc<AppState>>,
     Json(policy): Json<WorkspacePolicy>,
 ) -> Result<impl IntoResponse, SentinelError> {
+    // A threshold that moves is worth a line in the log.
+    //
+    // PUT replaces, and both thresholds carry serde defaults, so a body that
+    // simply omits them resets a workspace hardened to 40/20 back to 70/35 and
+    // answers 200 OK. That is correct HTTP and a genuinely dangerous default:
+    // 2.0.2 shipped with every Postgres workspace silently governed at 70/35
+    // while its configuration said otherwise, and nobody noticed because
+    // nothing said anything. The fields are documented in `docs/openapi.yaml`
+    // now (with a parity test so they cannot fall out again); this makes the
+    // change audible as well as documented.
+    if let Ok(previous) = state
+        .policy_store
+        .get_workspace_policy(&policy.workspace_id)
+        .await
+    {
+        if previous.threshold_block != policy.threshold_block
+            || previous.threshold_review != policy.threshold_review
+        {
+            tracing::warn!(
+                workspace_id = %policy.workspace_id,
+                from_block = previous.threshold_block,
+                to_block = policy.threshold_block,
+                from_review = previous.threshold_review,
+                to_review = policy.threshold_review,
+                "workspace risk thresholds changed by an API write; omitting them on a PUT \
+                 resets them to the defaults (70/35)"
+            );
+        }
+    }
     state.policy_store.upsert_workspace(&policy).await?;
     Ok((StatusCode::OK, Json(policy)))
 }
@@ -615,11 +846,38 @@ async fn create_api_key_handler(
             )))
         }
     };
+    let agent_id = match scope {
+        KeyScope::Agent => Some(
+            body.agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    SentinelError::InvalidRequest(
+                        "agentId is required when scope is `agent`".into(),
+                    )
+                })?
+                .to_string(),
+        ),
+        KeyScope::Admin if body.agent_id.is_some() => {
+            return Err(SentinelError::InvalidRequest(
+                "agentId is only valid when scope is `agent`".into(),
+            ))
+        }
+        KeyScope::Admin => None,
+    };
     let (raw_key, key_hash) = generate_api_key();
     let key_id = uuid::Uuid::new_v4().to_string();
     state
         .api_key_store
-        .store_key_scoped(&key_id, &key_hash, &body.label, &raw_key, scope)
+        .store_key_scoped(
+            &key_id,
+            &key_hash,
+            &body.label,
+            &raw_key,
+            scope,
+            agent_id.as_deref(),
+        )
         .await?;
     state.auth_cache.set_keys_exist(true);
     Ok((
@@ -629,6 +887,7 @@ async fn create_api_key_handler(
             key: raw_key,
             label: body.label,
             scope: scope.as_str().to_string(),
+            agent_id,
         }),
     ))
 }
@@ -651,6 +910,7 @@ async fn demo_scenarios_handler() -> Json<Vec<DemoScenario>> {
 }
 
 async fn run_adapter_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DemoResult>>, SentinelError> {
     let scenarios = crate::demo::scenarios::demo_scenarios();
@@ -677,7 +937,8 @@ async fn run_adapter_handler(
 
 // ── L1: Session Graph ──
 
-async fn list_sessions_handler() -> Json<Vec<serde_json::Value>> {
+/// Admin-scoped: other agents' live session graphs.
+async fn list_sessions_handler(_admin: RequireAdmin) -> Json<Vec<serde_json::Value>> {
     let sessions = session_dag::list_active_sessions();
     let json: Vec<serde_json::Value> = sessions
         .into_iter()
@@ -686,20 +947,25 @@ async fn list_sessions_handler() -> Json<Vec<serde_json::Value>> {
     Json(json)
 }
 
-async fn session_metrics_handler(Path(id): Path<String>) -> impl IntoResponse {
+/// Admin-scoped, with `GET /v1/sessions`. Not scoped by `read:self`: the path
+/// carries a SESSION id, not an agent id, so there is nothing to bind a
+/// per-agent token against without a lookup this route does not need.
+async fn session_metrics_handler(
+    _admin: RequireAdmin,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, SentinelError> {
     match session_dag::get_session_metrics(&id) {
-        Some(m) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(m).unwrap_or_default()),
-        )
-            .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        Some(m) => Ok(Json(serde_json::to_value(m).unwrap_or_default())),
+        None => Err(SentinelError::NotFound(format!("Session not found: {id}"))),
     }
 }
 
 // ── L3: NHI Identity ──
 
-async fn list_identities_handler() -> Json<Vec<serde_json::Value>> {
+/// Admin-scoped: every registered agent id, SPIFFE id, key commitment and
+/// trust score -- the target list for the per-agent reads this release closes.
+/// Its `POST` twin has been admin-only since the identity surface existed.
+async fn list_identities_handler(_admin: RequireAdmin) -> Json<Vec<serde_json::Value>> {
     let ids = crypto_identity::list_identities();
     let json: Vec<serde_json::Value> = ids
         .into_iter()
@@ -719,17 +985,32 @@ struct RegisterIdentityBody {
 
 async fn register_identity_handler(
     _admin: RequireAdmin,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<RegisterIdentityBody>,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Result<impl IntoResponse, SentinelError> {
     let identity = crypto_identity::register_identity(
         &body.agent_id,
         body.workspace_id.as_deref(),
         body.capabilities,
     );
-    (
+    // Persisted before it is acknowledged, for the same reason the token is:
+    // `verify_token_signature` reads the agent's derived secret out of the
+    // in-memory registry and fails closed when it is absent, and `main.rs`
+    // rebuilds that registry at boot from `list_identities()`. An identity that
+    // never reached storage is gone after a restart, and every durable
+    // capability token bound to it stops verifying -- which is exactly what
+    // migration 0008 was added to prevent. `execute_pipeline` has persisted its
+    // auto-registered identities since v0.4.0; this route never did.
+    let secret_hex = crypto_identity::get_secret_key_hex(&body.agent_id).unwrap_or_default();
+    state
+        .nhi_store
+        .store_identity(&identity, &secret_hex)
+        .await?;
+    Ok((
         StatusCode::CREATED,
         Json(serde_json::to_value(identity).unwrap_or_default()),
     )
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -739,9 +1020,13 @@ struct AttestBody {
     challenge: String,
 }
 
-async fn attest_handler(Json(body): Json<AttestBody>) -> Json<serde_json::Value> {
+async fn attest_handler(
+    auth: AuthContext,
+    Json(body): Json<AttestBody>,
+) -> Result<Json<serde_json::Value>, SentinelError> {
+    auth.authorize_agent_id(&body.agent_id)?;
     let result = crypto_identity::attest_agent(&body.agent_id, &body.challenge);
-    Json(serde_json::to_value(result).unwrap_or_default())
+    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
 }
 
 #[derive(Deserialize)]
@@ -750,18 +1035,28 @@ struct CreateChallengeBody {
     agent_id: String,
 }
 
-async fn create_challenge_handler(Json(body): Json<CreateChallengeBody>) -> impl IntoResponse {
+async fn create_challenge_handler(
+    auth: AuthContext,
+    Json(body): Json<CreateChallengeBody>,
+) -> Result<impl IntoResponse, SentinelError> {
+    auth.authorize_agent_id(&body.agent_id)?;
     match crypto_identity::create_challenge(&body.agent_id) {
-        Some(challenge) => (
+        Some(challenge) => Ok((
             StatusCode::CREATED,
             Json(serde_json::to_value(challenge).unwrap_or_default()),
         )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "agent not registered"})),
-        )
-            .into_response(),
+            .into_response()),
+        // Naming the remedy, because this 404 is reachable on the happy path:
+        // an agent can have a profile and an agent-scoped key and still have no
+        // NHI identity, since the identity is created lazily by its first
+        // governed action. 2.1.0 makes that gap matter — `read:self` is the
+        // documented answer to the reads this release closes, so "not
+        // registered" is what a user hits while following the upgrade notes.
+        None => Err(SentinelError::NotFound(format!(
+            "No NHI identity for {}; register it with POST /v1/nhi/identities, \
+             or let the agent's first governed action create it",
+            body.agent_id
+        ))),
     }
 }
 
@@ -773,10 +1068,14 @@ struct VerifyAttestBody {
     signature: String,
 }
 
-async fn verify_attestation_handler(Json(body): Json<VerifyAttestBody>) -> Json<serde_json::Value> {
+async fn verify_attestation_handler(
+    auth: AuthContext,
+    Json(body): Json<VerifyAttestBody>,
+) -> Result<Json<serde_json::Value>, SentinelError> {
+    auth.authorize_agent_id(&body.agent_id)?;
     let result =
         crypto_identity::verify_attestation(&body.agent_id, &body.challenge_id, &body.signature);
-    Json(serde_json::to_value(result).unwrap_or_default())
+    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
 }
 
 #[derive(Deserialize)]
@@ -792,22 +1091,104 @@ fn default_ttl() -> i64 {
     3600
 }
 
-async fn issue_token_handler(Json(body): Json<IssueTokenBody>) -> impl IntoResponse {
+/// Minting a capability token is an operator action.
+///
+/// It had no guard at all, so any agent-scoped key could mint
+/// `capabilities: ["*"]` for any registered agent id. That was harmless only
+/// because nothing verified the token; the moment it started granting access it
+/// would have been a privilege-escalation hole, so the guard lands in the same
+/// change that gives the token teeth.
+async fn issue_token_handler(
+    _admin: RequireAdmin,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<IssueTokenBody>,
+) -> Result<impl IntoResponse, SentinelError> {
+    // A TTL that cannot be honoured is refused rather than minted.
+    //
+    // `ttlSeconds` went straight into `Duration::seconds`, so a negative value
+    // minted a `201 valid: true` token that was already expired — a credential
+    // the API says is good and every check rejects — and a value large enough to
+    // push the expiry past year 9999 minted one that cannot even be rendered
+    // back, so it was dead on arrival in the same way. Neither told the caller
+    // anything.
+    //
+    // The ceiling exists because a capability token is a bearer credential with
+    // no revocation pressure on the holder: the only reason to mint a ten-year
+    // one is that nothing stopped you. A year is far past any legitimate agent
+    // session and still a finite blast radius; `DELETE /v1/nhi/tokens/{id}`
+    // remains the way to end one early.
+    const MAX_TTL_SECONDS: i64 = 365 * 24 * 60 * 60;
+    if body.ttl_seconds <= 0 || body.ttl_seconds > MAX_TTL_SECONDS {
+        return Err(SentinelError::InvalidRequest(format!(
+            "ttlSeconds must be between 1 and {MAX_TTL_SECONDS} (one year), got {}",
+            body.ttl_seconds
+        )));
+    }
     match crypto_identity::issue_capability_token(
         &body.agent_id,
         body.capabilities,
         body.ttl_seconds,
     ) {
-        Some(token) => (
-            StatusCode::CREATED,
-            Json(serde_json::to_value(token).unwrap_or_default()),
-        )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "agent not registered"})),
-        )
-            .into_response(),
+        Some(token) => {
+            // Persisted before it is handed out: a token the caller holds but
+            // the store has never seen would verify nowhere.
+            state.nhi_store.store_capability_token(&token).await?;
+            Ok((
+                StatusCode::CREATED,
+                Json(serde_json::to_value(&token).unwrap_or_default()),
+            )
+                .into_response())
+        }
+        // Naming the remedy, because this 404 is reachable on the happy path:
+        // an agent can have a profile and an agent-scoped key and still have no
+        // NHI identity, since the identity is created lazily by its first
+        // governed action. 2.1.0 makes that gap matter — `read:self` is the
+        // documented answer to the reads this release closes, so "not
+        // registered" is what a user hits while following the upgrade notes.
+        None => Err(SentinelError::NotFound(format!(
+            "No NHI identity for {}; register it with POST /v1/nhi/identities, \
+             or let the agent's first governed action create it",
+            body.agent_id
+        ))),
+    }
+}
+
+/// The inventory a revocation needs.
+///
+/// Minting and revoking both take an id the caller already holds, so an
+/// operator could only ever withdraw a token whose id they had written down at
+/// mint time: "what is currently authorized" had no answer at all, on a bearer
+/// credential that grants access to another agent's governance data.
+///
+/// Admin-only, like the other two, and the `signature` is not in the response:
+/// it is the server's own HMAC over the row, recomputed from the agent's
+/// derived secret on every check, so publishing it would hand out a valid MAC
+/// under that secret next to the plaintext it covers — and an inventory does
+/// not need it. The row is excluded in the SQL projection rather than filtered
+/// afterwards, so a later edit cannot reintroduce it by accident.
+async fn list_tokens_handler(
+    _admin: RequireAdmin,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::storage::traits::CapabilityTokenRecord>>, SentinelError> {
+    Ok(Json(state.nhi_store.list_capability_tokens().await?))
+}
+
+/// Revoke a capability token. Durable and fleet-wide, because the row is the
+/// authority -- there is no in-process token cache to go stale.
+///
+/// This route did not exist: `revoke_token` was implemented and unreachable, so
+/// a token could be minted and never withdrawn.
+async fn revoke_token_handler(
+    _admin: RequireAdmin,
+    State(state): State<Arc<AppState>>,
+    Path(token_id): Path<String>,
+) -> Result<StatusCode, SentinelError> {
+    if state.nhi_store.revoke_capability_token(&token_id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(SentinelError::NotFound(format!(
+            "Capability token not found: {token_id}"
+        )))
     }
 }
 
@@ -849,7 +1230,9 @@ async fn risk_feedback_handler(
 
 // ── L5: Sandbox ──
 
-async fn sandbox_pending_handler() -> Json<Vec<serde_json::Value>> {
+/// Admin-scoped: every agent's held-back actions. Its approve and reject
+/// twins below were already admin-only, so this read was the asymmetric one.
+async fn sandbox_pending_handler(_admin: RequireAdmin) -> Json<Vec<serde_json::Value>> {
     let pending = sandbox_executor::list_pending();
     let json: Vec<serde_json::Value> = pending
         .into_iter()
@@ -866,39 +1249,42 @@ async fn sandbox_pending_handler() -> Json<Vec<serde_json::Value>> {
 async fn sandbox_approve_handler(
     _admin: RequireAdmin,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> Result<impl IntoResponse, SentinelError> {
     match sandbox_executor::approve_sandbox(&id) {
-        Some(r) => (
+        Some(r) => Ok((
             StatusCode::OK,
             Json(serde_json::to_value(r).unwrap_or_default()),
         )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "sandbox not found"})),
-        )
-            .into_response(),
+            .into_response()),
+        None => Err(SentinelError::NotFound(format!(
+            "Sandbox entry not found: {id}"
+        ))),
     }
 }
 
-async fn sandbox_reject_handler(_admin: RequireAdmin, Path(id): Path<String>) -> impl IntoResponse {
+async fn sandbox_reject_handler(
+    _admin: RequireAdmin,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, SentinelError> {
     match sandbox_executor::reject_sandbox(&id) {
-        Some(r) => (
+        Some(r) => Ok((
             StatusCode::OK,
             Json(serde_json::to_value(r).unwrap_or_default()),
         )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "sandbox not found"})),
-        )
-            .into_response(),
+            .into_response()),
+        None => Err(SentinelError::NotFound(format!(
+            "Sandbox entry not found: {id}"
+        ))),
     }
 }
 
 // ── L6: Policy Verification ──
 
+/// Same read as `get_workspace_handler` behind an analysis pass: it loads an
+/// arbitrary workspace policy and reports its shape. Gating the policy read but
+/// not its verifier would have left the same disclosure one route over.
 async fn verify_policy_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, SentinelError> {
@@ -929,7 +1315,13 @@ async fn firewall_stats_handler() -> Json<serde_json::Value> {
 
 // ── L8: Telemetry ──
 
-async fn telemetry_spans_handler() -> Json<Vec<serde_json::Value>> {
+/// Admin-scoped. The span buffer records `agent.id`, `tool.name`,
+/// `governance.decision` and `risk.score` for every governed action and keeps
+/// 10_000 of them newest-first, so polling this route reconstructs exactly the
+/// cross-tenant firehose that `/v1/events/stream` and `/v1/audit` refuse to an
+/// agent-scoped key. Closing those two and leaving this open was shutting one
+/// door and leaving the next one open on the same data.
+async fn telemetry_spans_handler(_admin: RequireAdmin) -> Json<Vec<serde_json::Value>> {
     let spans = otel_emitter::get_recent_spans(100);
     let json: Vec<serde_json::Value> = spans
         .into_iter()
@@ -938,7 +1330,9 @@ async fn telemetry_spans_handler() -> Json<Vec<serde_json::Value>> {
     Json(json)
 }
 
-async fn telemetry_metrics_handler() -> Json<Vec<serde_json::Value>> {
+/// Admin-scoped, with `/v1/telemetry/spans`: the same per-agent governance
+/// counters, aggregated.
+async fn telemetry_metrics_handler(_admin: RequireAdmin) -> Json<Vec<serde_json::Value>> {
     let metrics = otel_emitter::get_recent_metrics(100);
     let json: Vec<serde_json::Value> = metrics
         .into_iter()
@@ -947,7 +1341,9 @@ async fn telemetry_metrics_handler() -> Json<Vec<serde_json::Value>> {
     Json(json)
 }
 
-async fn telemetry_export_handler() -> Json<Vec<serde_json::Value>> {
+/// Admin-scoped, with `/v1/telemetry/spans`: the OTLP rendering of the same
+/// buffer, 200 records at a time.
+async fn telemetry_export_handler(_admin: RequireAdmin) -> Json<Vec<serde_json::Value>> {
     let records = otel_emitter::export_otlp_json(200);
     let json: Vec<serde_json::Value> = records
         .into_iter()
@@ -959,9 +1355,11 @@ async fn telemetry_export_handler() -> Json<Vec<serde_json::Value>> {
 // ── Response Scanning ──
 
 async fn response_scan_handler(
+    auth: AuthContext,
     State(state): State<Arc<AppState>>,
     Json(payload): Json<ResponseScanRequest>,
 ) -> Result<Json<ResponseScanResult>, SentinelError> {
+    auth.authorize_agent_id(&payload.agent_id)?;
     let result = scan_response(&payload);
 
     tracing::info!(
@@ -1028,25 +1426,38 @@ async fn response_patterns_handler() -> Json<Vec<SensitivePattern>> {
 
 // ── Behavioral Fingerprinting ──
 
+/// Admin, OR an agent reading its OWN behavioural record with a capability
+/// token. Named in the `CAP_READ_SELF` doc alongside analytics and profile.
 async fn get_fingerprint_handler(
+    capability: CapabilityTokenHeader,
     State(state): State<Arc<AppState>>,
+    request_parts: axum::http::Extensions,
     Path(agent_id): Path<String>,
-) -> impl IntoResponse {
+) -> Result<axum::response::Response, SentinelError> {
+    authorize_agent_scope(
+        &state,
+        &request_parts,
+        &capability,
+        &agent_id,
+        crypto_identity::CAP_READ_SELF,
+    )
+    .await?;
     match state.behavioral_engine.get_fingerprint(&agent_id) {
-        Some(fp) => (
+        Some(fp) => Ok((
             StatusCode::OK,
             Json(serde_json::to_value(fp).unwrap_or_default()),
         )
-            .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "agent fingerprint not found"})),
-        )
-            .into_response(),
+            .into_response()),
+        None => Err(SentinelError::NotFound(format!(
+            "No behavioural fingerprint for agent: {agent_id}"
+        ))),
     }
 }
 
+/// Admin-scoped: every agent's behavioural record. The per-agent read below
+/// is the one an agent can reach for itself, with `read:self`.
 async fn list_fingerprints_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<serde_json::Value>> {
     let fingerprints = state.behavioral_engine.list_fingerprints();
@@ -1059,12 +1470,24 @@ async fn list_fingerprints_handler(
 
 // ── Rate Limiting ──
 
+/// Admin, OR an agent reading its OWN rate-limit state with a capability
+/// token. Named in the `CAP_READ_SELF` doc alongside analytics and profile.
 async fn rate_limit_status_handler(
+    capability: CapabilityTokenHeader,
     State(state): State<Arc<AppState>>,
+    request_parts: axum::http::Extensions,
     Path(agent_id): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, SentinelError> {
+    authorize_agent_scope(
+        &state,
+        &request_parts,
+        &capability,
+        &agent_id,
+        crypto_identity::CAP_READ_SELF,
+    )
+    .await?;
     let status = state.rate_limiter.status(&agent_id).await;
-    Json(serde_json::to_value(status).unwrap_or_default())
+    Ok(Json(serde_json::to_value(status).unwrap_or_default()))
 }
 
 async fn get_rate_limit_config_handler(
@@ -1080,6 +1503,16 @@ async fn update_rate_limit_config_handler(
     Json(new_config): Json<RateLimitConfig>,
 ) -> Json<RateLimitConfig> {
     state.rate_limiter.update_config(new_config.clone()).await;
+    // Persist it too. `save_config` shipped with a full UPSERT on both backends
+    // and no caller, while `main.rs` reads the row back at boot — so a tightened
+    // limit answered 200, survived until restart, and then silently reverted to
+    // the defaults. On the multi-replica deployment that `values.yaml` gives as
+    // the reason to choose Postgres, it bound only the replica that served the
+    // POST. Best-effort: the in-memory limiter is already updated, so a storage
+    // failure must not turn a successful tightening into an error response.
+    if let Err(e) = state.rate_limit_store.save_config(&new_config).await {
+        tracing::warn!(error = %e, "rate-limit config applied in memory but not persisted");
+    }
     Json(new_config)
 }
 
@@ -1104,15 +1537,13 @@ async fn delete_threat_indicator_handler(
     _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> Result<StatusCode, SentinelError> {
     if state.threat_feed.remove_indicator(&id) {
-        StatusCode::NO_CONTENT.into_response()
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "indicator not found"})),
-        )
-            .into_response()
+        Err(SentinelError::NotFound(format!(
+            "Threat indicator not found: {id}"
+        )))
     }
 }
 
@@ -1192,15 +1623,13 @@ async fn delete_dlq_handler(
     _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> Result<StatusCode, SentinelError> {
     if state.webhook_manager.dlq().remove(&id).await {
-        StatusCode::NO_CONTENT.into_response()
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "DLQ entry not found"})),
-        )
-            .into_response()
+        Err(SentinelError::NotFound(format!(
+            "DLQ entry not found: {id}"
+        )))
     }
 }
 
@@ -1252,15 +1681,19 @@ async fn get_template_handler(
             "workspace": tpl.workspace,
             "rules": tpl.rules,
         }))),
-        None => Err(SentinelError::InvalidRequest(format!(
-            "template '{template_id}' not found"
+        None => Err(SentinelError::NotFound(format!(
+            "Template not found: {template_id}"
         ))),
     }
 }
 
 // ── v0.4.0: Policy Rules per Workspace ──
 
+/// Admin-scoped, with `GET /v1/workspaces/{id}`. The workspace body carries
+/// the block/review thresholds; its rules are the other half of the same
+/// policy, and the `POST` twin below was already admin-only.
 async fn list_workspace_rules_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, SentinelError> {
@@ -1478,7 +1911,10 @@ async fn cost_summary_handler() -> Json<serde_json::Value> {
 }
 
 #[cfg(feature = "cost-control")]
+/// Admin-scoped: per-agent spend across the fleet. The other `/v1/cost/*`
+/// routes aggregate without naming an agent and stay open.
 async fn cost_by_agent_handler(
+    _admin: RequireAdmin,
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<CostQuery>,
 ) -> Result<Json<serde_json::Value>, SentinelError> {
@@ -1583,4 +2019,45 @@ async fn cost_pricing_handler() -> Json<serde_json::Value> {
 #[cfg(not(feature = "cost-control"))]
 async fn cost_pricing_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "enabled": false }))
+}
+
+#[cfg(test)]
+mod csv_export_tests {
+    use super::csv_field;
+
+    #[test]
+    fn ordinary_values_are_left_alone() {
+        assert_eq!(csv_field("openclaw-builder-01"), "openclaw-builder-01");
+        assert_eq!(csv_field("block"), "block");
+        assert_eq!(csv_field(""), "");
+    }
+
+    /// The three shapes that corrupted a real export.
+    #[test]
+    fn commas_quotes_and_newlines_are_quoted() {
+        assert_eq!(csv_field("bad,agent"), "\"bad,agent\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field("two\nlines"), "\"two\nlines\"");
+        assert_eq!(csv_field("cr\rlf"), "\"cr\rlf\"");
+    }
+
+    /// The exact agent id and tool name that split one audit row into two.
+    #[test]
+    fn the_measured_corrupting_values_round_trip_as_one_field_each() {
+        let agent = csv_field("bad,agent\"id");
+        let tool = csv_field("tool\"with,comma");
+        assert_eq!(agent, "\"bad,agent\"\"id\"");
+        assert_eq!(tool, "\"tool\"\"with,comma\"");
+
+        // A quoted field contains no unescaped delimiter, so a parser reading
+        // this row sees one field per column rather than the four the raw
+        // interpolation produced.
+        for field in [&agent, &tool] {
+            let inner = &field[1..field.len() - 1];
+            assert!(
+                inner.replace("\"\"", "").find('"').is_none(),
+                "every inner quote must be doubled: {field}"
+            );
+        }
+    }
 }

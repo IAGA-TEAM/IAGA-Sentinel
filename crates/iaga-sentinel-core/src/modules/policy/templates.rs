@@ -9,6 +9,8 @@ use crate::core::types::{
     ActionType, GovernanceDecision, ProtocolKind, ToolPolicy, WorkspacePolicy,
 };
 
+use crate::modules::risk::adaptive_scorer;
+
 use super::rules_engine::{ConditionSet, MatchCriteria, PolicyRule};
 use super::time_window::TimeWindow;
 
@@ -158,7 +160,14 @@ fn permissive_dev() -> PolicyTemplate {
                     ..Default::default()
                 },
                 conditions: ConditionSet {
-                    min_risk_score: Some(60),
+                    // The ADAPTIVE score, whose measured band is 9..48 (ceiling
+                    // 64 at default weights) -- not the composite 0..100 the API
+                    // reports. At 60 this rule could not fire: 60 is above the
+                    // whole measured band, and the [60,64] tail requires
+                    // `context_risk == 90`, which only happens on `taint.blocked`,
+                    // by which point the pipeline has already forced Block. So it
+                    // was never the reason for any verdict.
+                    min_adaptive_score: Some(adaptive_scorer::ADAPTIVE_THRESHOLD_REVIEW),
                     ..Default::default()
                 },
                 decision: GovernanceDecision::Review,
@@ -317,7 +326,14 @@ fn compliance_soc2() -> PolicyTemplate {
                             "friday".into(),
                         ],
                     }),
-                    max_risk_score: Some(40),
+                    // Also the ADAPTIVE score. This one moved verdicts rather
+                    // than being merely dead: the adaptive mean is 23.6, so a cap
+                    // of 40 was satisfied by nearly every request, and an Allow
+                    // rule that always matches downgrades a Review to Allow
+                    // during business hours. Capping at the adaptive REVIEW
+                    // threshold makes "with low risk" mean what the reason string
+                    // says, and it can only ever be stricter than the old 40.
+                    max_adaptive_score: Some(adaptive_scorer::ADAPTIVE_THRESHOLD_REVIEW),
                     ..Default::default()
                 },
                 decision: GovernanceDecision::Allow,

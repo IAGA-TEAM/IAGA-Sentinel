@@ -73,8 +73,13 @@ pub async fn run_mcp_proxy(
     config: McpProxyConfig,
     state: Arc<AppState>,
 ) -> Result<(), SentinelError> {
+    // One proxy process gets one run identity. Without metadata.sessionId,
+    // receipt logging falls back to the random event id and every governed call
+    // becomes a one-receipt run.
+    let session_id = format!("mcp-proxy-{}", uuid::Uuid::new_v4());
     tracing::info!(
         agent_id = %config.agent_id,
+        session_id = %session_id,
         downstream = %config.downstream_command,
         "Starting MCP proxy mode"
     );
@@ -143,7 +148,14 @@ pub async fn run_mcp_proxy(
 
                         match request.method.as_str() {
                             "tools/call" => {
-                                let response = handle_tool_call(&request, &config, &state, &mut downstream_writer, &mut downstream_reader).await;
+                                let response = handle_tool_call(
+                                    &request,
+                                    &config,
+                                    &session_id,
+                                    &state,
+                                    &mut downstream_writer,
+                                    &mut downstream_reader,
+                                ).await;
                                 let out = match serde_json::to_string(&response) {
                                     Ok(s) => s,
                                     Err(e) => {
@@ -209,6 +221,7 @@ fn spawn_downstream(config: &McpProxyConfig) -> Result<Child, SentinelError> {
 async fn handle_tool_call(
     request: &JsonRpcRequest,
     config: &McpProxyConfig,
+    session_id: &str,
     state: &Arc<AppState>,
     downstream_writer: &mut tokio::process::ChildStdin,
     downstream_reader: &mut CappedLines<BufReader<tokio::process::ChildStdout>>,
@@ -232,7 +245,7 @@ async fn handle_tool_call(
     );
 
     // Run governance pipeline
-    let intercept = intercept_tool_call(state, &config.agent_id, &tool_call).await;
+    let intercept = intercept_tool_call(state, &config.agent_id, session_id, &tool_call).await;
 
     match intercept {
         InterceptResult::Allow => {
@@ -244,8 +257,7 @@ async fn handle_tool_call(
                 use crate::modules::cost::cache;
                 let action_type = infer_action_type(&tool_call.name);
                 let tainted =
-                    !crate::modules::taint::taint_tracker::get_session_taint(&config.agent_id)
-                        .is_empty();
+                    !crate::modules::taint::taint_tracker::get_session_taint(session_id).is_empty();
                 if cache::is_cacheable(action_type) && !tainted {
                     let args = serde_json::to_value(&tool_call.arguments).unwrap_or_default();
                     let key = cache::CacheKey {

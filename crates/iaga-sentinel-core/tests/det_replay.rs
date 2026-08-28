@@ -69,7 +69,6 @@ async fn build_state(receipts: Arc<SignedReceiptLogger>) -> Arc<AppState> {
         review_store: storage.clone(),
         policy_store: storage.clone(),
         api_key_store: storage.clone(),
-        tenant_store: storage.clone(),
         nhi_store: storage.clone(),
         session_store: storage.clone(),
         taint_store: storage.clone(),

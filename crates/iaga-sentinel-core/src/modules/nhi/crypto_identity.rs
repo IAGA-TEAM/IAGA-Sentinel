@@ -54,7 +54,7 @@ struct StoredIdentity {
     pub secret_key: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityToken {
     pub token_id: String,
@@ -106,8 +106,6 @@ pub struct MutualAttestationResult {
 // ── Store ──
 
 static IDENTITIES: Lazy<Mutex<HashMap<String, StoredIdentity>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-static TOKENS: Lazy<Mutex<HashMap<String, CapabilityToken>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static CHALLENGES: Lazy<Mutex<HashMap<String, StoredChallenge>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -210,7 +208,12 @@ pub fn register_identity(
         agent_id: agent_id.to_string(),
         spiffe_id,
         key_commitment: pub_hex,
-        created_at: Utc::now().to_rfc3339(),
+        // Six digits, not chrono's variable 0/3/6/9: this column is read back
+        // through `to_char(..., '...US+00:00')` on Postgres, which always
+        // renders six. Not signed, so a mismatch is a parity bug rather than an
+        // auth break -- but it is the same hazard `rfc3339_storage` exists for,
+        // and the two backends should agree on what they hand back.
+        created_at: rfc3339_storage(Utc::now()),
         attestation_status: "registered".into(),
         trust_score: 0.5,
         capabilities: capabilities.clone(),
@@ -499,6 +502,67 @@ pub fn mutual_attest(initiator_id: &str, responder_id: &str) -> MutualAttestatio
 
 // ── Capability Tokens ──
 
+/// Capability granting an agent read access to its OWN governance data.
+///
+/// The read halves of the per-agent surface became admin-only in 2.1.0, which
+/// left an agent with no way to see its own analytics, profile, fingerprint or
+/// rate-limit state. This token is that access: it is bound to one `agent_id`,
+/// so it can never widen into another agent's data.
+pub const CAP_READ_SELF: &str = "read:self";
+
+/// Wildcard capability. Accepted by [`token_grants`], and the reason
+/// `issue_token_handler` is admin-only.
+pub const CAP_WILDCARD: &str = "*";
+
+/// Render an instant the way every storage backend renders it back.
+///
+/// The signature covers `expires_at` as a STRING, so the string a backend hands
+/// back has to be byte-identical to the one that was signed. `to_rfc3339()` is
+/// not that string: it uses `SecondsFormat::AutoSi` and emits zero, three, six
+/// or nine fractional digits depending on the value. The `capability_tokens`
+/// column is `TIMESTAMPTZ` on Postgres, which stores microseconds and is read
+/// back through `to_char(..., 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00')` -- always
+/// exactly six. A nine-digit mint therefore came back six-digit and the token
+/// stopped verifying: measured, 54 of 64 mints on a machine with 100 ns clock
+/// granularity, and every one of them a token the holder could not use.
+///
+/// Pinning the mint to microseconds is the whole fix. The SQLite `expires_at <
+/// ?` prune was NOT affected and is left alone: `+` sorts below every digit, so
+/// a shorter fraction already compared as the earlier instant.
+///
+/// `receipts.timestamp` is TEXT on Postgres for exactly this reason; this is
+/// that lesson applied one table over.
+fn rfc3339_storage(dt: chrono::DateTime<Utc>) -> String {
+    dt.to_rfc3339_opts(chrono::SecondsFormat::Micros, false)
+}
+
+/// The exact bytes a token's signature covers.
+///
+/// Kept in one place so issuing and verification cannot drift: a mismatch here
+/// would make every token fail to verify (fail-closed) or, worse, make the
+/// signature cover less than it appears to.
+fn token_payload(
+    token_id: &str,
+    agent_id: &str,
+    capabilities: &[String],
+    expires_at: &str,
+) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        token_id,
+        agent_id,
+        capabilities.join(","),
+        expires_at
+    )
+}
+
+/// Mint a capability token for a registered agent.
+///
+/// Pure: it does NOT store the token. Until 2.0.2 it inserted into a
+/// process-global `HashMap`, which meant every issued token was forgotten on
+/// restart and never crossed a replica -- tolerable while the token authorized
+/// nothing, and not tolerable now that it does. The caller persists it through
+/// [`crate::storage::traits::NhiStore`], so revocation is durable and fleet-wide.
 pub fn issue_capability_token(
     agent_id: &str,
     capabilities: Vec<String>,
@@ -510,64 +574,80 @@ pub fn issue_capability_token(
     let now = Utc::now();
     let expires = now + chrono::Duration::seconds(ttl_seconds);
     let token_id = Uuid::new_v4().to_string();
+    let expires_at = rfc3339_storage(expires);
 
-    let payload = format!(
-        "{}:{}:{}:{}",
-        token_id,
-        agent_id,
-        capabilities.join(","),
-        expires.to_rfc3339()
+    let signature = sign(
+        &stored.secret_key,
+        &token_payload(&token_id, agent_id, &capabilities, &expires_at),
     );
-    let signature = sign(&stored.secret_key, &payload);
 
-    let token = CapabilityToken {
-        token_id: token_id.clone(),
+    Some(CapabilityToken {
+        token_id,
         agent_id: agent_id.to_string(),
         capabilities,
-        issued_at: now.to_rfc3339(),
-        expires_at: expires.to_rfc3339(),
+        issued_at: rfc3339_storage(now),
+        expires_at,
         signature,
         valid: true,
-    };
-
-    drop(store);
-    TOKENS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(token_id, token.clone());
-    Some(token)
+    })
 }
 
-pub fn verify_capability_token(token_id: &str, required_capability: &str) -> bool {
-    let tokens = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(token) = tokens.get(token_id) {
-        if !token.valid {
-            return false;
-        }
-        // Check expiry
-        if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(&token.expires_at) {
+/// Recompute the token's HMAC from the agent's derived secret and compare it
+/// in constant time.
+///
+/// This is the check that was missing entirely: `verify_capability_token` used
+/// to look the id up in a map and read the fields back, so `signature` was
+/// decorative and the token was an opaque bearer id. Verifying it means a row
+/// read out of storage does not have to be trusted -- tampering with the
+/// `capabilities`, `agent_id` or `expires_at` column invalidates it.
+///
+/// Symmetric by design (CRYPTO-NHI-2): only the server, which holds every
+/// agent's derived secret, can verify. A relying party cannot, and asymmetric
+/// agent identity is Enterprise (ADR 0010).
+///
+/// Fails closed when the agent is not in the in-memory registry.
+pub fn verify_token_signature(token: &CapabilityToken) -> bool {
+    let store = IDENTITIES.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(stored) = store.get(&token.agent_id) else {
+        return false;
+    };
+    verify_signature(
+        &stored.secret_key,
+        &token_payload(
+            &token.token_id,
+            &token.agent_id,
+            &token.capabilities,
+            &token.expires_at,
+        ),
+        &token.signature,
+    )
+}
+
+/// Whether `token` is presently usable for `required_capability`.
+///
+/// Checks, in order: not revoked, signature intact, not expired, capability
+/// granted. An unparseable `expires_at` is treated as EXPIRED rather than
+/// ignored -- the old code parsed it and simply skipped the expiry check when
+/// parsing failed, so a corrupt timestamp produced an immortal token.
+pub fn token_grants(token: &CapabilityToken, required_capability: &str) -> bool {
+    if !token.valid {
+        return false;
+    }
+    if !verify_token_signature(token) {
+        return false;
+    }
+    match chrono::DateTime::parse_from_rfc3339(&token.expires_at) {
+        Ok(expires) => {
             if Utc::now() > expires {
                 return false;
             }
         }
-        // Check capability
-        token
-            .capabilities
-            .contains(&required_capability.to_string())
-            || token.capabilities.contains(&"*".to_string())
-    } else {
-        false
+        Err(_) => return false,
     }
-}
-
-pub fn revoke_token(token_id: &str) -> bool {
-    let mut tokens = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(token) = tokens.get_mut(token_id) {
-        token.valid = false;
-        true
-    } else {
-        false
-    }
+    token
+        .capabilities
+        .iter()
+        .any(|c| c == required_capability || c == CAP_WILDCARD)
 }
 
 // ── Trust Score Updates ──
@@ -630,6 +710,5 @@ pub fn get_agent_trust(agent_id: &str) -> f64 {
 /// shared maps between runs; also useful for operational resets.
 pub fn reset_state() {
     IDENTITIES.lock().unwrap_or_else(|e| e.into_inner()).clear();
-    TOKENS.lock().unwrap_or_else(|e| e.into_inner()).clear();
     CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }

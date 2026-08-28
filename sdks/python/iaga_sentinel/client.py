@@ -11,6 +11,46 @@ from .types import GovernanceResult, InspectRequest
 JsonDict = dict[str, Any]
 
 
+class SentinelApiError(httpx.HTTPStatusError):
+    """An error response from the Sentinel API, carrying the server's message.
+
+    ``_raise_for_status(response)`` raises ``httpx.HTTPStatusError``, whose text
+    is the status line and a link to MDN — the server's own explanation is
+    discarded. A first-time user calling ``inspect()`` for an agent that has no
+    profile saw only ``Client error '404 Not Found'`` and had no way to guess the
+    cause, while the TypeScript client showed ``agent_not_found: Agent not found:
+    builder-01`` for the same request.
+
+    Subclasses ``httpx.HTTPStatusError`` on purpose, so code that already
+    catches that keeps working.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        try:
+            body: Any = response.json()
+        except Exception:  # noqa: BLE001 - a non-JSON error body is still useful
+            body = response.text
+        detail = ""
+        if isinstance(body, dict):
+            detail = str(body.get("message") or body.get("error") or "").strip()
+        elif isinstance(body, str):
+            detail = body.strip()[:400]
+        path = response.request.url.path if response.request else "<unknown>"
+        message = f"{response.status_code} {path}"
+        if detail:
+            message = f"{message}: {detail}"
+        super().__init__(message, request=response.request, response=response)
+        self.status_code = response.status_code
+        self.body = body
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    """Like ``_raise_for_status(response)``, but keeps the server's message."""
+    if response.is_success:
+        return
+    raise SentinelApiError(response)
+
+
 def _clean_params(params: Mapping[str, Any]) -> JsonDict:
     return {key: value for key, value in params.items() if value is not None}
 
@@ -29,10 +69,17 @@ class AsyncSentinelClient:
         base_url: str = "http://localhost:4010",
         api_key: Optional[str] = None,
         timeout: float = 10.0,
+        capability_token: Optional[str] = None,
     ):
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        # The token minted by `issue_token`. Every docstring that
+        # returns one tells the caller to present it in this header; until
+        # 2.1.0 the client had no way to. ponytail: one header, set once at
+        # construction -- a token is bound to one agent, and so is a client.
+        if capability_token:
+            headers["X-IAGA-Capability-Token"] = capability_token
         self._client = httpx.AsyncClient(
             base_url=base_url,
             headers=headers,
@@ -41,29 +88,29 @@ class AsyncSentinelClient:
 
     async def _get(self, path: str, **params: Any) -> Any:
         response = await self._client.get(path, params=_clean_params(params))
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def _post(self, path: str, json: Optional[JsonDict] = None) -> Any:
         response = await self._client.post(path, json=json)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def _put(self, path: str, json: JsonDict) -> Any:
         response = await self._client.put(path, json=json)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     async def _delete(self, path: str) -> None:
         response = await self._client.delete(path)
-        response.raise_for_status()
+        _raise_for_status(response)
 
     async def inspect(self, request: InspectRequest | Mapping[str, Any]) -> GovernanceResult:
         response = await self._client.post(
             "/v1/inspect",
             json=_normalize_inspect_request(request),
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return GovernanceResult.from_dict(response.json())
 
     async def list_audit(self) -> list[JsonDict]:
@@ -94,7 +141,7 @@ class AsyncSentinelClient:
                 }
             ),
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         if format == "csv":
             return response.text
         return response.json()
@@ -148,8 +195,16 @@ class AsyncSentinelClient:
     async def list_keys(self) -> list[JsonDict]:
         return await self._get("/v1/auth/keys")
 
-    async def create_key(self, label: str) -> JsonDict:
-        return await self._post("/v1/auth/keys", {"label": label})
+    async def create_key(
+        self,
+        label: str,
+        scope: str = "admin",
+        agent_id: Optional[str] = None,
+    ) -> JsonDict:
+        body: JsonDict = {"label": label, "scope": scope}
+        if agent_id is not None:
+            body["agentId"] = agent_id
+        return await self._post("/v1/auth/keys", body)
 
     async def delete_key(self, key_id: str) -> None:
         await self._delete(f"/v1/auth/keys/{key_id}")
@@ -238,6 +293,17 @@ class AsyncSentinelClient:
         capabilities: list[str],
         ttl_seconds: int = 3600,
     ) -> JsonDict:
+        """Mint a capability token bound to ``agent_id``.
+
+        Requires an ADMIN key (2.1.0): the route had no guard, so any
+        agent-scoped key could mint ``capabilities=["*"]`` for any agent.
+
+        Present the returned ``tokenId`` in the ``X-IAGA-Capability-Token``
+        header to use it. ``read:self`` lets an agent read its own
+        ``/v1/profiles/{agent_id}`` and ``/v1/analytics/agents/{agent_id}``,
+        which are otherwise admin-only. A token is bound to one agent and can
+        never read another's data, whatever capabilities it carries.
+        """
         return await self._post(
             "/v1/nhi/tokens",
             {
@@ -246,6 +312,25 @@ class AsyncSentinelClient:
                 "ttlSeconds": ttl_seconds,
             },
         )
+
+    async def list_tokens(self) -> list[JsonDict]:
+        """List the capability tokens currently outstanding. ADMIN key.
+
+        Signatures are withheld: this answers "what is authorized right now",
+        which is the question an operator asks before revoking. Without it the
+        SDK could mint and revoke but not enumerate, so revoking meant already
+        knowing the ``tokenId`` you were looking for.
+        """
+        return await self._get("/v1/nhi/tokens")
+
+    async def revoke_token(self, token_id: str) -> None:
+        """Revoke a capability token. Requires an ADMIN key.
+
+        Durable and fleet-wide: the stored row is the authority, so there is no
+        in-process cache to go stale. New in 2.1.0 -- revocation was
+        implemented but had no route, so a token could never be withdrawn.
+        """
+        await self._delete(f"/v1/nhi/tokens/{token_id}")
 
     async def get_risk_weights(self) -> JsonDict:
         return await self._get("/v1/risk/weights")
@@ -365,10 +450,17 @@ class SentinelClient:
         base_url: str = "http://localhost:4010",
         api_key: Optional[str] = None,
         timeout: float = 10.0,
+        capability_token: Optional[str] = None,
     ):
         headers = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        # The token minted by `issue_token`. Every docstring that
+        # returns one tells the caller to present it in this header; until
+        # 2.1.0 the client had no way to. ponytail: one header, set once at
+        # construction -- a token is bound to one agent, and so is a client.
+        if capability_token:
+            headers["X-IAGA-Capability-Token"] = capability_token
         self._client = httpx.Client(
             base_url=base_url,
             headers=headers,
@@ -377,29 +469,29 @@ class SentinelClient:
 
     def _get(self, path: str, **params: Any) -> Any:
         response = self._client.get(path, params=_clean_params(params))
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def _post(self, path: str, json: Optional[JsonDict] = None) -> Any:
         response = self._client.post(path, json=json)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def _put(self, path: str, json: JsonDict) -> Any:
         response = self._client.put(path, json=json)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def _delete(self, path: str) -> None:
         response = self._client.delete(path)
-        response.raise_for_status()
+        _raise_for_status(response)
 
     def inspect(self, request: InspectRequest | Mapping[str, Any]) -> GovernanceResult:
         response = self._client.post(
             "/v1/inspect",
             json=_normalize_inspect_request(request),
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         return GovernanceResult.from_dict(response.json())
 
     def list_audit(self) -> list[JsonDict]:
@@ -430,7 +522,7 @@ class SentinelClient:
                 }
             ),
         )
-        response.raise_for_status()
+        _raise_for_status(response)
         if format == "csv":
             return response.text
         return response.json()
@@ -484,8 +576,16 @@ class SentinelClient:
     def list_keys(self) -> list[JsonDict]:
         return self._get("/v1/auth/keys")
 
-    def create_key(self, label: str) -> JsonDict:
-        return self._post("/v1/auth/keys", {"label": label})
+    def create_key(
+        self,
+        label: str,
+        scope: str = "admin",
+        agent_id: Optional[str] = None,
+    ) -> JsonDict:
+        body: JsonDict = {"label": label, "scope": scope}
+        if agent_id is not None:
+            body["agentId"] = agent_id
+        return self._post("/v1/auth/keys", body)
 
     def delete_key(self, key_id: str) -> None:
         self._delete(f"/v1/auth/keys/{key_id}")
@@ -574,6 +674,17 @@ class SentinelClient:
         capabilities: list[str],
         ttl_seconds: int = 3600,
     ) -> JsonDict:
+        """Mint a capability token bound to ``agent_id``.
+
+        Requires an ADMIN key (2.1.0): the route had no guard, so any
+        agent-scoped key could mint ``capabilities=["*"]`` for any agent.
+
+        Present the returned ``tokenId`` in the ``X-IAGA-Capability-Token``
+        header to use it. ``read:self`` lets an agent read its own
+        ``/v1/profiles/{agent_id}`` and ``/v1/analytics/agents/{agent_id}``,
+        which are otherwise admin-only. A token is bound to one agent and can
+        never read another's data, whatever capabilities it carries.
+        """
         return self._post(
             "/v1/nhi/tokens",
             {
@@ -582,6 +693,14 @@ class SentinelClient:
                 "ttlSeconds": ttl_seconds,
             },
         )
+
+    def list_tokens(self) -> list[JsonDict]:
+        """List outstanding capability tokens. ADMIN key. See the async twin."""
+        return self._get("/v1/nhi/tokens")
+
+    def revoke_token(self, token_id: str) -> None:
+        """Revoke a capability token. Requires an ADMIN key. See the async twin."""
+        self._delete(f"/v1/nhi/tokens/{token_id}")
 
     def get_risk_weights(self) -> JsonDict:
         return self._get("/v1/risk/weights")

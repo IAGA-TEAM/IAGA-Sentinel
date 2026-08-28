@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: IAGA Sentinel API
-  version: 2.0.2
+  version: 2.1.0
   description: >
     IAGA Sentinel is the EU AI Act conformity evidence layer for AI agents.
     It intercepts tool calls, evaluates risk against typed policies, and
@@ -20,8 +20,10 @@ info:
     escalates to review on its own at 50.
 
 
-    Since 1.5.2 API keys carry a scope: `admin` (default — full access,
-    identical to pre-1.5.2 keys) or `agent` (governance surface only).
+    API keys carry a scope: `admin` (default — full cross-agent access) or
+    `agent` (governance surface as exactly the `agentId` bound at issuance).
+    A cross-agent assertion returns `403 agent_scope_mismatch`; an agent key
+    migrated without a binding returns `403 agent_key_unbound` until rotated.
     Operations marked "admin scope" reject agent-scoped keys with
     `403 admin_scope_required`. Endpoints under the `cost-control` feature
     respond with `{"enabled": false}` when the server was compiled without it.
@@ -228,9 +230,13 @@ paths:
             format: date-time
         - name: limit
           in: query
+          description: >-
+            Maximum rows returned. The server caps this at 50000; a larger value
+            is clamped, not honoured.
           schema:
             type: integer
             default: 1000
+            maximum: 50000
       responses:
         "200":
           description: Filtered audit events (JSON array or CSV body)
@@ -241,6 +247,18 @@ paths:
                 items:
                   $ref: "#/components/schemas/StoredAuditEvent"
             text/csv:
+              schema:
+                type: string
+        "400":
+          description: >-
+            `format` is neither `json` nor `csv`; the JSON body is an
+            `ErrorResponse` with code `invalid_request`. Query values rejected
+            by the extractor, such as a non-numeric `limit`, use `text/plain`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+            text/plain:
               schema:
                 type: string
         "401":
@@ -285,6 +303,8 @@ paths:
                   $ref: "#/components/schemas/AgentAnalytics"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -306,6 +326,8 @@ paths:
                   $ref: "#/components/schemas/AgentAnalytics"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CapabilityRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -325,6 +347,8 @@ paths:
                   $ref: "#/components/schemas/ReviewRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -332,6 +356,17 @@ paths:
     post:
       operationId: resolveReview
       summary: Approve or reject a pending review
+      description: >
+        Terminal — a review can be resolved once; a second attempt is refused
+        and names the decision that already stands. The resolution is APPENDED
+        to the audit log as its own event: framework `review-resolution`,
+        `reviewStatus` approved/rejected, `decision` allow/block, and `reasons`
+        carrying `review-resolved:<status>`, `review-request:<eventId>` and
+        `resolved-by:<keyId>`. The audit row the governed action wrote is never
+        rewritten and keeps `reviewStatus: pending` — it records what was true
+        when the action was governed. Join the two by the
+        `review-request:<eventId>` line in `reasons`; a review request's id is
+        the `eventId` of the action that opened it.
       tags: [Reviews]
       parameters:
         - $ref: "#/components/parameters/ReviewId"
@@ -350,6 +385,8 @@ paths:
                 $ref: "#/components/schemas/ReviewRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -371,6 +408,8 @@ paths:
                   $ref: "#/components/schemas/AgentProfile"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
     post:
@@ -413,6 +452,8 @@ paths:
                 $ref: "#/components/schemas/AgentProfile"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CapabilityRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -476,6 +517,8 @@ paths:
                   $ref: "#/components/schemas/WorkspacePolicy"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
     post:
@@ -518,6 +561,8 @@ paths:
                 $ref: "#/components/schemas/WorkspacePolicy"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -581,6 +626,8 @@ paths:
                 $ref: "#/components/schemas/WorkspaceRulesResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -649,10 +696,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TemplateDetail"
-        "400":
-          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /v1/auth/keys:
     get:
@@ -811,12 +858,22 @@ paths:
       responses:
         "200":
           description: Delivery re-enqueued
+        "400":
+          description: >-
+            The entry exists but its webhook is no longer registered, so there
+            is no delivery target to retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /v1/webhooks/dlq/{id}:
     delete:
@@ -850,6 +907,8 @@ paths:
                 description: Newline-delimited SSE frames with JSON event data
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/sessions:
     get:
@@ -867,6 +926,8 @@ paths:
                   $ref: "#/components/schemas/SessionInfo"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/sessions/{id}/metrics:
     get:
@@ -884,6 +945,8 @@ paths:
                 $ref: "#/components/schemas/SessionMetrics"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -903,6 +966,8 @@ paths:
                   $ref: "#/components/schemas/NhiIdentity"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
     post:
       operationId: registerNhiIdentity
       summary: Register a new non-human identity with a cryptographic key pair
@@ -945,6 +1010,8 @@ paths:
                 $ref: "#/components/schemas/AttestationResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/nhi/challenge:
     post:
@@ -972,6 +1039,8 @@ paths:
                 description: Challenge object (challengeId, nonce, expiry)
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1006,11 +1075,76 @@ paths:
                 description: Attestation verification outcome (verified flag, trust update)
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/nhi/tokens:
+    get:
+      operationId: listCapabilityTokens
+      summary: List outstanding capability tokens
+      description: >
+        Every stored token, newest first. Admin-scoped. The `signature` is NOT
+        returned: it is the server's own HMAC over the stored row, recomputed
+        from the agent's derived secret on every check, so publishing it would
+        hand out a valid MAC under that secret next to the plaintext it covers
+        — and an inventory does not need it. On the wire the token **id** is the
+        bearer half.
+
+        Added in 2.1.0. Minting and revoking both take an id the caller already
+        holds, so a token could previously only be withdrawn if someone had
+        written its id down at mint time: "what is currently authorized" had no
+        answer. `valid` goes false on revocation; an EXPIRED token can still
+        read `valid: true` until the cleanup sweep drops the row (every 300s by
+        default, `IAGA_SENTINEL_CLEANUP_INTERVAL_SECS`), so compare `expiresAt`
+        rather than trusting `valid` alone.
+      tags: [NHI]
+      responses:
+        "200":
+          description: Outstanding tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [tokenId, agentId, capabilities, issuedAt, expiresAt, valid]
+                  properties:
+                    tokenId:
+                      type: string
+                    agentId:
+                      type: string
+                    capabilities:
+                      type: array
+                      items:
+                        type: string
+                    issuedAt:
+                      type: string
+                      format: date-time
+                    expiresAt:
+                      type: string
+                      format: date-time
+                    valid:
+                      type: boolean
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
     post:
       operationId: issueCapabilityToken
       summary: Issue a time-limited capability token for an agent
+      description: >
+        Mints a capability token bound to one `agentId`. Admin-scoped (2.1.0):
+        the route had no guard, so any agent-scoped key could mint
+        `capabilities: ["*"]` for any agent. The token is signed with the
+        agent's derived NHI secret and persisted, so it survives a restart and
+        can be revoked fleet-wide.
+
+
+        Present it in the `X-IAGA-Capability-Token` header alongside the
+        ordinary `Authorization` bearer key. `read:self` lets an agent read its
+        own `/v1/profiles/{agentId}` and `/v1/analytics/agents/{agentId}`, which
+        are otherwise admin-only. A token can never read another agent's data,
+        whatever capabilities it carries.
       tags: [NHI]
       requestBody:
         required: true
@@ -1027,6 +1161,34 @@ paths:
                 $ref: "#/components/schemas/CapabilityToken"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/nhi/tokens/{tokenId}:
+    delete:
+      operationId: revokeCapabilityToken
+      summary: Revoke a capability token
+      description: >
+        Marks the token invalid. Durable and fleet-wide, because the stored row
+        is the authority and there is no in-process cache to go stale. New in
+        2.1.0: revocation was implemented but had no route, so a token could be
+        minted and never withdrawn.
+      tags: [NHI]
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Token revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1111,6 +1273,8 @@ paths:
                   $ref: "#/components/schemas/SandboxEntry"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/sandbox/{id}/approve:
     post:
@@ -1170,6 +1334,8 @@ paths:
                 $ref: "#/components/schemas/PolicyVerificationResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
@@ -1227,6 +1393,8 @@ paths:
                   $ref: "#/components/schemas/TelemetrySpan"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/telemetry/metrics:
     get:
@@ -1244,6 +1412,8 @@ paths:
                   $ref: "#/components/schemas/TelemetryMetric"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/telemetry/export:
     get:
@@ -1261,6 +1431,8 @@ paths:
                   $ref: "#/components/schemas/OtlpExportRecord"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   # ── Response Scanning ──
   /v1/response/scan:
@@ -1283,6 +1455,8 @@ paths:
                 $ref: "#/components/schemas/ResponseScanResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /v1/response/patterns:
     get:
@@ -1318,6 +1492,8 @@ paths:
                 $ref: "#/components/schemas/RateLimitStatus"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CapabilityRequired"
 
   /v1/rate-limit/config:
     get:
@@ -1372,6 +1548,8 @@ paths:
                   $ref: "#/components/schemas/AgentFingerprint"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/fingerprint/{agent_id}:
     get:
@@ -1389,6 +1567,8 @@ paths:
                 $ref: "#/components/schemas/AgentFingerprint"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/CapabilityRequired"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1517,6 +1697,8 @@ paths:
                   $ref: "#/components/schemas/DemoResult"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1637,6 +1819,8 @@ paths:
                 $ref: "#/components/schemas/CostRowsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/AdminScopeRequired"
 
   /v1/cost/by-model:
     get:
@@ -1856,7 +2040,7 @@ components:
     Forbidden:
       description: >-
         Policy violation, or a scope the caller is not entitled to assert
-        (`scope_mismatch`).
+        (`scope_mismatch`, `agent_scope_mismatch`, or `agent_key_unbound`).
       content:
         application/json:
           schema:
@@ -1865,6 +2049,17 @@ components:
       description: >
         The presented API key has `agent` scope; this operation requires an
         `admin`-scoped key (error code `admin_scope_required`, 1.5.2).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    CapabilityRequired:
+      description: >
+        Neither an `admin`-scoped key nor a capability token granting the
+        required capability for this agent (error code `capability_required`,
+        2.1.0). Present a token in the `X-IAGA-Capability-Token` header. An
+        agent-scoped API key must also be bound to the same agent; a capability
+        token never widens the key's identity.
       content:
         application/json:
           schema:
@@ -1949,8 +2144,12 @@ components:
             - invalid_api_key
             - admin_scope_required
             - scope_mismatch
+            - agent_scope_mismatch
+            - agent_key_unbound
             - invalid_request
             - review_not_found
+            - not_found
+            - capability_required
             - internal_error
             - config_error
             - io_error
@@ -2371,6 +2570,20 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ActionType"
+        tenantId:
+          type: string
+          nullable: true
+        toolTrust:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          default: 0.7
+          description: >
+            Per-agent trust multiplier applied to the tool-risk layer. Persisted
+            since migration 0006. Same PUT hazard as the workspace thresholds:
+            the field has a serde default, so a body that omits it resets the
+            agent to 0.7 with 200 OK and no warning.
 
     ToolPolicy:
       type: object
@@ -2418,6 +2631,9 @@ components:
       properties:
         workspaceId:
           type: string
+        tenantId:
+          type: string
+          nullable: true
         allowedProtocols:
           type: array
           items:
@@ -2430,19 +2646,39 @@ components:
           type: array
           items:
             type: string
+        thresholdBlock:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 70
+          description: >
+            Composite risk score at or above which the verdict is `block`.
+            OMITTING THIS ON A PUT RESETS IT TO 70. The handler replaces the
+            whole policy, and the field has a serde default, so a body built
+            without it silently un-hardens a workspace that had been tightened
+            — with 200 OK and no warning. Always send the value you read back.
+        thresholdReview:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 35
+          description: >
+            Composite risk score at or above which the verdict is `review`.
+            Same PUT hazard as `thresholdBlock`: omitting it resets it to 35.
 
     # ── Auth ──
     KeyScope:
       type: string
       enum: [admin, agent]
       description: >
-        1.5.2 API-key scope. `admin` (default) has full access, identical to
-        pre-1.5.2 keys; `agent` may drive the governance surface but not
-        manage keys, webhooks, rate-limit config, threat intel, or plugins.
+        API-key scope. `admin` (default) has full access; `agent` may drive
+        the governance surface only as the `agentId` bound when the key was
+        created, and may not manage keys, webhooks, rate-limit config, threat
+        intel, or plugins.
 
     ApiKeyRecord:
       type: object
-      required: [id, label, createdAt, scope]
+      required: [id, label, createdAt, scope, agentId]
       properties:
         id:
           type: string
@@ -2454,6 +2690,10 @@ components:
           format: date-time
         scope:
           $ref: "#/components/schemas/KeyScope"
+        agentId:
+          type: string
+          nullable: true
+          description: Bound identity for an agent-scoped key; null for admin keys
 
     CreateApiKeyBody:
       type: object
@@ -2464,10 +2704,13 @@ components:
           description: Human-readable label for the key
         scope:
           $ref: "#/components/schemas/KeyScope"
+        agentId:
+          type: string
+          description: Required and non-empty when `scope` is `agent`; rejected for admin keys
 
     ApiKeyCreated:
       type: object
-      required: [id, key, label, scope]
+      required: [id, key, label, scope, agentId]
       properties:
         id:
           type: string
@@ -2479,6 +2722,10 @@ components:
           type: string
         scope:
           $ref: "#/components/schemas/KeyScope"
+        agentId:
+          type: string
+          nullable: true
+          description: Bound identity for an agent-scoped key; null for admin keys
 
     # ── Webhooks ──
     WebhookConfig:
@@ -2628,7 +2875,15 @@ components:
         ttlSeconds:
           type: integer
           default: 3600
-          description: Token time-to-live in seconds
+          minimum: 1
+          maximum: 31536000
+          description: >
+            Token lifetime in seconds, 1 second to one year. Outside that range
+            the mint is refused with 400: a negative value produced a token the
+            API reported `valid: true` while every check rejected it as expired,
+            and a value large enough to push the expiry past year 9999 produced
+            one that could not be rendered back at all. Revoke early with
+            `DELETE /v1/nhi/tokens/{tokenId}`.
 
     CapabilityToken:
       type: object
@@ -3252,21 +3507,38 @@ components:
           description: Stable signer identity (`ed25519-<hex16>`)
         policyHash:
           type: string
-          description: Hex SHA-256 of the active policy bundle
+          description: >
+            The receipt logger's CONFIGURED policy hash, which is not necessarily
+            the `policy_hash` inside the receipts listed below. A receipt records
+            the hash that governed that request; this field records what the
+            logger was started with, and on a default build that is still the M2
+            placeholder `sha256("iaga-sentinel-policy-v0")`. The two disagreeing
+            is expected, not corruption — do not treat this value as a statement
+            about the runs in `runs[]`.
         runs:
           type: array
+          description: >
+            NOTE the field names inside `runs[]` are snake_case, unlike the rest
+            of this API. `RunSummary` (crates/iaga-sentinel-receipts) carries no
+            `rename_all = "camelCase"`, so it has served these names since the
+            route shipped in 2.0.2. The spec documented the camelCase forms it
+            ought to have used, which meant a client generated from it read
+            `undefined` for every field of every run. The spec is corrected here
+            rather than the server, because renaming a response that has already
+            shipped would silently break existing integrations for a cosmetic
+            gain; the enclosing object stays camelCase.
           items:
             type: object
             properties:
-              runId:
+              run_id:
                 type: string
-              receiptCount:
+              receipt_count:
                 type: integer
-              firstTimestamp:
+              first_timestamp:
                 type: string
-              lastTimestamp:
+              last_timestamp:
                 type: string
-              terminalVerdict:
+              terminal_verdict:
                 $ref: "#/components/schemas/GovernanceDecision"
 
     ReceiptRunResponse:

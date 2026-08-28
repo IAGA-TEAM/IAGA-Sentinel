@@ -5,6 +5,7 @@ import {
   inspectWithPolicy,
 } from "../client";
 import type { ActionType, InspectRequest, JsonObject, OpenAIAdapterOptions } from "../types";
+import { inferActionType } from "./infer-action-type";
 
 /**
  * Governs a LangGraph tool node: inspects every tool call before it runs.
@@ -40,15 +41,6 @@ function getToolName(tool: ToolLike): string | undefined {
     return tool.name || undefined;
   }
   return tool.name;
-}
-
-function inferActionType(name: string): ActionType {
-  const n = name.toLowerCase();
-  if (/(shell|bash|terminal|exec|command)/.test(n)) return "shell";
-  if (/(http|fetch|web|url|request)/.test(n)) return "http";
-  if (/(write|edit|create|delete)/.test(n)) return "file_write";
-  if (/(read|file|glob|grep|cat|list)/.test(n)) return "file_read";
-  return "custom";
 }
 
 async function invokeTool(tool: ToolLike | undefined, args: unknown): Promise<unknown> {

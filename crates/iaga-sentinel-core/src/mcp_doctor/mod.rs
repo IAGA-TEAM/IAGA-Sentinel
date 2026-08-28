@@ -332,21 +332,24 @@ pub async fn run_doctor(state: &Arc<AppState>, config: DoctorConfig) -> DoctorRe
     report.tools_listed = tools.len();
 
     // 4. per-tool: schema shape + governance encapsulability (real pipeline run)
+    // One doctor invocation gets one run identity; without it, its N governed
+    // checks were N unrelated one-receipt runs.
+    let session_id = format!("mcp-doctor-{}", uuid::Uuid::new_v4());
     for tool in &tools {
         let (schema_present, schema_well_formed, schema_reason) = check_schema(&tool.input_schema);
         let params = McpToolCallParams {
             name: tool.name.clone(),
             arguments: Default::default(),
         };
-        let (decision, reasons) = match intercept_tool_call(state, &config.agent_id, &params).await
-        {
-            InterceptResult::Allow => ("allow".to_string(), Vec::new()),
-            InterceptResult::Review { risk_score, .. } => (
-                "review".to_string(),
-                vec![format!("risk score {risk_score}")],
-            ),
-            InterceptResult::Block { reasons, .. } => ("block".to_string(), reasons),
-        };
+        let (decision, reasons) =
+            match intercept_tool_call(state, &config.agent_id, &session_id, &params).await {
+                InterceptResult::Allow => ("allow".to_string(), Vec::new()),
+                InterceptResult::Review { risk_score, .. } => (
+                    "review".to_string(),
+                    vec![format!("risk score {risk_score}")],
+                ),
+                InterceptResult::Block { reasons, .. } => ("block".to_string(), reasons),
+            };
         report.tools.push(ToolCheck {
             name: tool.name.clone(),
             schema_present,
@@ -387,13 +390,23 @@ pub async fn run_doctor(state: &Arc<AppState>, config: DoctorConfig) -> DoctorRe
 }
 
 impl DoctorReport {
-    /// Exit code: 0 = healthy, 1 = handshake failed or a tool schema is not
-    /// well-formed. Lets `mcp-doctor` slot into CI as a gate.
+    /// Exit code: 0 = healthy, 1 = handshake failed, a tool schema is not
+    /// well-formed, or an explicitly requested probe failed. Lets `mcp-doctor`
+    /// slot into CI as a gate.
+    ///
+    /// The probe used to be excluded, so `--probe-tool X` reported
+    /// `probe: FAILED` in its own output and still exited 0 — the one flag whose
+    /// entire purpose is "does calling this actually work" could not gate the
+    /// CI job it exists for. A probe is only run when the operator asks for it
+    /// by name, so failing on it cannot surprise anyone who did not.
     pub fn exit_code(&self) -> i32 {
         if !self.initialized || self.error.is_some() {
             return 1;
         }
         if self.tools.iter().any(|t| !t.schema_well_formed) {
+            return 1;
+        }
+        if self.probe.as_ref().is_some_and(|p| !p.ok) {
             return 1;
         }
         0
@@ -526,5 +539,65 @@ mod tests {
             error: None,
         };
         assert!(!r.authoritative);
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::{DoctorReport, ProbeResult};
+
+    fn healthy() -> DoctorReport {
+        DoctorReport {
+            server_command: "iaga mcp-server".into(),
+            initialized: true,
+            server_name: Some("iaga".into()),
+            server_version: Some("2.1.0".into()),
+            protocol_version: Some("2024-11-05".into()),
+            tools_listed: 0,
+            tools: Vec::new(),
+            probe: None,
+            authoritative: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_healthy_report_with_no_probe_exits_zero() {
+        assert_eq!(healthy().exit_code(), 0);
+    }
+
+    #[test]
+    fn a_failed_handshake_exits_one() {
+        let mut r = healthy();
+        r.initialized = false;
+        assert_eq!(r.exit_code(), 1);
+    }
+
+    /// The measured defect: `--probe-tool` printed `FAILED` and exited 0, so the
+    /// one flag whose purpose is "does calling this work" could not gate CI.
+    #[test]
+    fn a_failed_probe_exits_one() {
+        let mut r = healthy();
+        r.probe = Some(ProbeResult {
+            tool: "search".into(),
+            ok: false,
+            error: Some("downstream refused".into()),
+        });
+        assert_eq!(
+            r.exit_code(),
+            1,
+            "a probe the operator explicitly asked for must gate the exit code"
+        );
+    }
+
+    #[test]
+    fn a_successful_probe_still_exits_zero() {
+        let mut r = healthy();
+        r.probe = Some(ProbeResult {
+            tool: "search".into(),
+            ok: true,
+            error: None,
+        });
+        assert_eq!(r.exit_code(), 0);
     }
 }

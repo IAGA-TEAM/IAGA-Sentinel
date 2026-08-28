@@ -35,12 +35,18 @@
 
 use std::sync::OnceLock;
 
+use iaga_sentinel::auth::api_keys::generate_api_key;
 use iaga_sentinel::core::types::{
     ActionType, GovernanceDecision, ProtocolKind, ReviewRequest, ReviewStatus, StoredAuditEvent,
     ToolPolicy, WorkspacePolicy,
 };
+use iaga_sentinel::modules::nhi::crypto_identity::{
+    issue_capability_token, register_identity, verify_token_signature,
+};
 use iaga_sentinel::storage::postgres::PostgresStorage;
-use iaga_sentinel::storage::traits::{AuditStore, PolicyStore, ReviewStore};
+use iaga_sentinel::storage::traits::{
+    ApiKeyStore, AuditStore, KeyScope, NhiStore, PolicyStore, ReviewStore,
+};
 
 /// Values chosen so that a decode failure is unmistakable: each differs from
 /// its own fallback constant (70 / 35) AND from the other, so an implementation
@@ -329,4 +335,106 @@ async fn both_backends_return_the_same_thresholds() {
     );
 
     pg.delete_workspace(ws).await.expect("cleanup");
+}
+
+// ── 2.1.0: the two tables this release adds ──
+//
+// `0008_capability_tokens` and `0009_api_key_agent_binding` reach a live
+// Postgres in CI only as DDL: `PostgresStorage::new` runs the migrator, so the
+// schema is exercised, but until these two cases nothing read a row back. Both
+// tables are on an authorization path, and both have the shape that produced
+// the 2.0.1 incident this file was written for — a value that is signed or
+// compared, crossing a column whose Postgres type differs from SQLite's
+// (`TIMESTAMPTZ` vs `TEXT`, and a nullable `agent_id` that decides whether a
+// key fails closed).
+
+/// The signature covers `expires_at` **as a string**, and on Postgres that
+/// string is re-rendered by `to_char` on the way out. `capability_token_pg_roundtrip.rs`
+/// proves the rendering is lossless by simulating it; this proves the real
+/// column does the same thing, which is the half a simulation cannot.
+#[tokio::test]
+async fn a_capability_token_still_verifies_after_a_postgres_round_trip() {
+    let _guard = test_lock().lock().await;
+    let Some(store) =
+        pg_store("a_capability_token_still_verifies_after_a_postgres_round_trip").await
+    else {
+        return;
+    };
+
+    let agent = "parity-capability-token";
+    register_identity(agent, None, vec![]);
+    let token = issue_capability_token(agent, vec!["read:self".to_string()], 3600)
+        .expect("agent is registered");
+
+    store
+        .store_capability_token(&token)
+        .await
+        .expect("store token");
+    let back = store
+        .get_capability_token(&token.token_id)
+        .await
+        .expect("read token")
+        .expect("the token that was just stored must come back");
+
+    assert_eq!(back.agent_id, token.agent_id);
+    assert_eq!(back.capabilities, token.capabilities);
+    assert!(back.valid, "a freshly issued token must come back valid");
+    assert!(
+        verify_token_signature(&back),
+        "the token stopped verifying after Postgres: expires_at was signed as {:?} \
+         and came back as {:?}",
+        token.expires_at,
+        back.expires_at,
+    );
+
+    assert!(
+        store
+            .revoke_capability_token(&token.token_id)
+            .await
+            .expect("revoke"),
+        "revoking a token that exists must report that it did",
+    );
+}
+
+/// `0009` adds `api_keys.agent_id`. The whole guard rests on that column
+/// surviving the read: a binding that decodes to `None` does not fail open —
+/// it fails closed with `agent_key_unbound` — but it locks a correctly created
+/// key out of its own data, which on Postgres nothing checked.
+#[tokio::test]
+async fn an_agent_scoped_keys_binding_survives_a_postgres_round_trip() {
+    let _guard = test_lock().lock().await;
+    let Some(store) = pg_store("an_agent_scoped_keys_binding_survives_a_postgres_round_trip").await
+    else {
+        return;
+    };
+
+    let key_id = format!("parity-agent-key-{}", uuid::Uuid::new_v4());
+    let (raw, hash) = generate_api_key();
+    store
+        .store_key_scoped(
+            &key_id,
+            &hash,
+            "parity",
+            &raw,
+            KeyScope::Agent,
+            Some("parity-bound-agent"),
+        )
+        .await
+        .expect("store agent-scoped key");
+
+    let verified = store
+        .verify_raw_key_scoped(&raw)
+        .await
+        .expect("verify")
+        .expect("a key that was just stored must verify");
+
+    assert_eq!(verified.scope, KeyScope::Agent);
+    assert_eq!(
+        verified.agent_id.as_deref(),
+        Some("parity-bound-agent"),
+        "the binding did not survive Postgres; an agent-scoped key that reads back \
+         unbound is locked out of its own data with agent_key_unbound",
+    );
+
+    store.delete_key(&key_id).await.expect("cleanup");
 }

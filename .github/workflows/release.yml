@@ -29,8 +29,31 @@ permissions:
   contents: write
 
 jobs:
+  # A tag must not publish anything that has not passed the tests.
+  #
+  # `ci.yml`, `release.yml` and `docker.yml` all trigger independently on the
+  # same `v*` tag, and `publish` depended only on `build` -- a `cargo build`, not
+  # a `cargo test`. A tag pushed onto a red commit still produced a GitHub
+  # Release with binaries and a ghcr push. This job is the gate: everything else
+  # here needs it, so a failing test stops the release rather than racing it.
+  #
+  # Deliberately a job in THIS workflow rather than a `workflow_run` trigger on
+  # ci.yml: `workflow_run` fires after the fact and cannot prevent the publish,
+  # it can only report on one that already happened.
+  test:
+    name: Test gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
   build:
     name: ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,11 +71,12 @@ jobs:
         # lock file, so it is not new supply-chain surface. That changes the TLS
         # backend and therefore the trust store the shipped binary uses, which
         # is not a change to make inside a patch release without testing it
-        # against a proxy-terminated network. Tracked for 2.1.0.
+        # against a proxy-terminated network. Not scheduled; arm64 Linux
+        # installs from source.
         #
         # Until then arm64 Linux installs from source:
         #   cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel \
-        #     --tag v2.0.2 --locked iaga-sentinel-core iaga-sentinel-verify
+        #     --tag v2.1.0 --locked iaga-sentinel-core iaga-sentinel-verify
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest

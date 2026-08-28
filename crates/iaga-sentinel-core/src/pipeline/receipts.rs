@@ -497,8 +497,22 @@ mod signed {
             match self.store.list_runs(limit).await {
                 Ok(runs) => serde_json::to_value(&runs).unwrap_or(serde_json::Value::Null),
                 Err(e) => {
-                    warn!(error = %e, "receipt list_runs failed");
-                    serde_json::json!({ "error": e.to_string() })
+                    // An empty ARRAY, not an error object.
+                    //
+                    // `runs` is declared `type: array` and `required` in the
+                    // OpenAPI spec, and a storage failure used to substitute
+                    // `{"error": "..."}` inside an otherwise success-shaped
+                    // `200 OK`. A client doing the obvious `d["runs"][:2]` got a
+                    // TypeError on a response the status line called a success,
+                    // and one that iterated got the string keys of the error
+                    // object as if they were runs.
+                    //
+                    // The failure is still surfaced — loudly, in the server log,
+                    // where an operator can act on it — but the wire type the
+                    // spec promises is not broken to carry it. A caller sees no
+                    // runs, which is what the server can honestly report.
+                    warn!(error = %e, "receipt list_runs failed; serving an empty run list");
+                    serde_json::Value::Array(Vec::new())
                 }
             }
         }

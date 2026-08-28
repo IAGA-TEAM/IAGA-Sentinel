@@ -127,6 +127,7 @@ pub trait ApiKeyStore: Send + Sync {
         label: &str,
         raw_key: &str,
         _scope: KeyScope,
+        _agent_id: Option<&str>,
     ) -> Result<(), SentinelError> {
         self.store_key(key_id, key_hash, label, raw_key).await
     }
@@ -142,18 +143,21 @@ pub trait ApiKeyStore: Send + Sync {
         Ok(self.verify_raw_key(raw_key).await?.then_some(VerifiedKey {
             key_id: None,
             scope: KeyScope::Admin,
+            agent_id: None,
         }))
     }
 }
 
-/// Tenant management store (enterprise multi-tenancy support).
-#[async_trait]
-pub trait TenantStore: Send + Sync {
-    async fn create_tenant(&self, tenant: &Tenant) -> Result<(), SentinelError>;
-    async fn get_tenant(&self, tenant_id: &str) -> Result<Tenant, SentinelError>;
-    async fn list_tenants(&self) -> Result<Vec<Tenant>, SentinelError>;
-    async fn delete_tenant(&self, tenant_id: &str) -> Result<(), SentinelError>;
-}
+// ponytail: a `TenantStore` trait and both backend impls used to sit here (148
+// lines). `git grep 'tenant_store\.'` returned nothing at all: the field was
+// populated on `StorageBundle` and `AppState` in fifteen places and never once
+// dereferenced. Deleted in 2.1.0.
+//
+// The `tenants` TABLE stays, and must: on Postgres it is the target of ten
+// FOREIGN KEY references (five in 0001_initial.sql, five re-issued as ALTER
+// TABLE in migrations.rs) and the `tenant_id` columns are live. `core::types::
+// Tenant` stays too — it is `pub` in a `pub mod`, so removing it would break
+// external Rust consumers for no gain.
 
 // ═══════════════════════════════════════════════════════════════
 // v0.4.0, Durable State Storage Traits
@@ -178,6 +182,60 @@ pub trait NhiStore: Send + Sync {
     ) -> Result<Option<PendingChallenge>, SentinelError>;
     async fn delete_challenge(&self, challenge_id: &str) -> Result<(), SentinelError>;
     async fn prune_expired_challenges(&self) -> Result<usize, SentinelError>;
+
+    // ── Capability tokens (2.1.0) ──
+    //
+    // Durable because the token now GRANTS access. Until 2.0.2 issued tokens
+    // lived in a process-global map: forgotten on restart, invisible to other
+    // replicas, and impossible to revoke fleet-wide.
+    async fn store_capability_token(
+        &self,
+        token: &crate::modules::nhi::crypto_identity::CapabilityToken,
+    ) -> Result<(), SentinelError>;
+    async fn get_capability_token(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<crate::modules::nhi::crypto_identity::CapabilityToken>, SentinelError>;
+    /// Mark a token revoked. `Ok(false)` when no such token exists.
+    async fn revoke_capability_token(&self, token_id: &str) -> Result<bool, SentinelError>;
+    /// Drop tokens whose expiry has passed. Returns how many went.
+    async fn prune_expired_capability_tokens(&self) -> Result<usize, SentinelError>;
+    /// Every stored token, newest first, WITHOUT its signature.
+    ///
+    /// The other four methods are all keyed by an id the caller already holds,
+    /// which is everything the authorization path needs and nothing an operator
+    /// needs: `DELETE /v1/nhi/tokens/{id}` could only ever withdraw an id
+    /// written down at mint time, so "what is currently authorized" had no
+    /// answer. `0008_capability_tokens.sql` already ships the index this read
+    /// wants — the index landed and the query did not.
+    async fn list_capability_tokens(&self) -> Result<Vec<CapabilityTokenRecord>, SentinelError>;
+}
+
+/// One capability token as an operator's inventory sees it: every column of
+/// `CapabilityToken` except `signature`.
+///
+/// The omission is structural rather than a serializer detail — there is no
+/// field to leak — and it is the same treatment `ApiKeyRecord` gives a key hash.
+/// Not because the signature is what authorizes: on the wire the token **id**
+/// is the bearer half, and the authorization path looks the row up by id
+/// without ever seeing a signature from the caller. The signature is the
+/// server's own HMAC over the stored row, recomputed from the agent's derived
+/// secret on every check, so publishing it would hand out a valid MAC under
+/// that secret next to the exact plaintext it covers — and buy an inventory
+/// answer nothing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityTokenRecord {
+    pub token_id: String,
+    pub agent_id: String,
+    pub capabilities: Vec<String>,
+    pub issued_at: String,
+    pub expires_at: String,
+    /// False once revoked. An expired token can still read `true` here until
+    /// the cleanup sweep drops the row (every 300s by default,
+    /// `IAGA_SENTINEL_CLEANUP_INTERVAL_SECS`), so compare `expires_at` rather
+    /// than trusting this alone.
+    pub valid: bool,
 }
 
 /// Persistent storage for Session Graph layer.
@@ -238,6 +296,10 @@ pub struct ApiKeyRecord {
     /// `admin` (the historical, fully-privileged behavior).
     #[serde(default = "default_admin_scope")]
     pub scope: String,
+    /// Agent identity an `agent`-scoped key may assert. `None` for admin and
+    /// pre-2.1.0 keys.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 fn default_admin_scope() -> String {
@@ -281,4 +343,5 @@ pub struct VerifiedKey {
     /// implementation that only reports a boolean match.
     pub key_id: Option<String>,
     pub scope: KeyScope,
+    pub agent_id: Option<String>,
 }

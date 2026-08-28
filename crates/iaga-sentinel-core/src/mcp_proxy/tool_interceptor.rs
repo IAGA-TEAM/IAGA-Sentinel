@@ -22,9 +22,13 @@ pub enum InterceptResult {
 }
 
 /// Intercept an MCP tools/call request through the governance pipeline.
+///
+/// `session_id` is the run identity minted once per process by its caller
+/// (`run_mcp_proxy` or `run_doctor`).
 pub async fn intercept_tool_call(
     state: &Arc<AppState>,
     agent_id: &str,
+    session_id: &str,
     tool_call: &McpToolCallParams,
 ) -> InterceptResult {
     // Map MCP tool call → InspectRequest
@@ -47,7 +51,12 @@ pub async fn intercept_tool_call(
             payload,
         },
         requested_secrets: None,
-        metadata: None,
+        // This same key scopes the receipt chain, session DAG, taint and spend
+        // state. Proxy and doctor each keep one agent id for the process life.
+        metadata: Some(HashMap::from([(
+            "sessionId".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        )])),
         usage: None,
     };
 

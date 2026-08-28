@@ -164,11 +164,24 @@ impl AuditStore for SqliteStorage {
         &self,
         filter: &AuditExportFilter,
     ) -> Result<Vec<StoredAuditEvent>, SentinelError> {
-        let limit = filter.limit.unwrap_or(1000) as i64;
+        let limit = filter
+            .limit
+            .unwrap_or(1000)
+            .min(crate::storage::MAX_AUDIT_EXPORT_ROWS) as i64;
         let agent = filter.agent_id.clone().unwrap_or_default();
         let decision = filter.decision.clone().unwrap_or_default();
-        let from = filter.from_date.clone().unwrap_or_default();
-        let to = filter.to_date.clone().unwrap_or_default();
+        // Parsed and normalized to a second-resolution UTC key, so any RFC3339
+        // offset selects the instant it names. See `normalize_audit_boundary`.
+        let from = crate::storage::normalize_audit_boundary(
+            filter.from_date.as_deref().unwrap_or_default(),
+            "from_date",
+            false,
+        )?;
+        let to = crate::storage::normalize_audit_boundary(
+            filter.to_date.as_deref().unwrap_or_default(),
+            "to_date",
+            true,
+        )?;
 
         // `tenant_id` was destructured and then never used: four WHERE
         // predicates where the Postgres twin has five. `tenant_id` is a
@@ -191,8 +204,8 @@ impl AuditStore for SqliteStorage {
              FROM audit_events
              WHERE (? = '' OR agent_id = ?)
                AND (? = '' OR decision = ?)
-               AND (? = '' OR timestamp >= ?)
-               AND (? = '' OR timestamp <= ?)
+               AND (? = '' OR substr(timestamp, 1, 19) >= ?)
+               AND (? = '' OR substr(timestamp, 1, 19) <= ?)
                AND (? = '' OR tenant_id = ?)
              ORDER BY created_at DESC, event_id DESC LIMIT ?"
         )
@@ -284,13 +297,16 @@ impl AuditStore for SqliteStorage {
 
         let agent_filter = agent_id.unwrap_or("");
 
+        // Three grouped queries, not one plus N per agent. See the Postgres twin
+        // and `fold_agent_analytics` for why the GROUP_CONCAT went away: it
+        // materialized one entry per audit event to compute a top-5, split a
+        // tool whose name contained a comma into two phantom tools, and left the
+        // top-5 tie order non-deterministic.
         let rows = sqlx::query(
             "SELECT agent_id,
                     COUNT(*) as total,
                     AVG(risk_score) as avg_risk,
-                    MAX(timestamp) as last_ts,
-                    GROUP_CONCAT(DISTINCT decision) as decisions_csv,
-                    GROUP_CONCAT(tool_name) as tools_csv
+                    MAX(timestamp) as last_ts
              FROM audit_events
              WHERE ? = '' OR agent_id = ?
              GROUP BY agent_id
@@ -301,56 +317,59 @@ impl AuditStore for SqliteStorage {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut results = Vec::new();
-        for row in &rows {
-            let aid: String = row.try_get("agent_id").unwrap_or_default();
-            let total: i64 = row.try_get("total").unwrap_or(0);
-            let avg_risk: f64 = row.try_get("avg_risk").unwrap_or(0.0);
-            let last_ts: String = row.try_get("last_ts").unwrap_or_default();
-            let tools_csv: String = row.try_get("tools_csv").unwrap_or_default();
+        let totals: Vec<crate::storage::AgentTotalsRow> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("agent_id").unwrap_or_default(),
+                    row.try_get::<i64, _>("total").unwrap_or(0) as u64,
+                    row.try_get::<f64, _>("avg_risk").unwrap_or(0.0),
+                    row.try_get::<String, _>("last_ts").unwrap_or_default(),
+                )
+            })
+            .collect();
 
-            // Count decisions per type
-            let decision_rows = sqlx::query(
-                "SELECT decision, COUNT(*) as cnt FROM audit_events WHERE agent_id = ? GROUP BY decision",
-            )
-            .bind(&aid)
-            .fetch_all(&self.pool)
-            .await?;
+        let decision_rows = sqlx::query(
+            "SELECT agent_id, decision, COUNT(*) as cnt
+             FROM audit_events
+             WHERE ? = '' OR agent_id = ?
+             GROUP BY agent_id, decision",
+        )
+        .bind(agent_filter)
+        .bind(agent_filter)
+        .fetch_all(&self.pool)
+        .await?;
 
-            let mut decisions = std::collections::HashMap::new();
-            for dr in &decision_rows {
-                let d: String = dr.try_get("decision").unwrap_or_default();
-                let c: i64 = dr.try_get("cnt").unwrap_or(0);
-                decisions.insert(d, c as u64);
-            }
+        let tool_rows = sqlx::query(
+            "SELECT agent_id, tool_name, COUNT(*) as cnt
+             FROM audit_events
+             WHERE ? = '' OR agent_id = ?
+             GROUP BY agent_id, tool_name
+             ORDER BY cnt DESC, tool_name ASC",
+        )
+        .bind(agent_filter)
+        .bind(agent_filter)
+        .fetch_all(&self.pool)
+        .await?;
 
-            // Count tool usage
-            let mut tool_counts: std::collections::HashMap<String, u64> =
-                std::collections::HashMap::new();
-            for tool in tools_csv.split(',') {
-                let t = tool.trim().to_string();
-                if !t.is_empty() {
-                    *tool_counts.entry(t).or_insert(0) += 1;
-                }
-            }
-            let mut top_tools: Vec<(String, u64)> = tool_counts.into_iter().collect();
-            top_tools.sort_by_key(|t| std::cmp::Reverse(t.1));
-            top_tools.truncate(5);
+        let as_counts =
+            |rows: &[sqlx::sqlite::SqliteRow], key: &str| -> Vec<crate::storage::AgentCountRow> {
+                rows.iter()
+                    .map(|row| {
+                        (
+                            row.try_get::<String, _>("agent_id").unwrap_or_default(),
+                            row.try_get::<String, _>(key).unwrap_or_default(),
+                            row.try_get::<i64, _>("cnt").unwrap_or(0) as u64,
+                        )
+                    })
+                    .collect()
+            };
 
-            let trust = crate::modules::nhi::crypto_identity::get_agent_trust(&aid);
-
-            results.push(AgentAnalytics {
-                agent_id: aid,
-                total_requests: total as u64,
-                decisions,
-                avg_risk_score: avg_risk,
-                top_tools,
-                last_activity: last_ts,
-                trust_score: trust,
-            });
-        }
-
-        Ok(results)
+        Ok(crate::storage::fold_agent_analytics(
+            totals,
+            as_counts(&decision_rows, "decision"),
+            as_counts(&tool_rows, "tool_name"),
+        ))
     }
 
     async fn cost_summary(
@@ -359,8 +378,14 @@ impl AuditStore for SqliteStorage {
         to: Option<&str>,
     ) -> Result<CostSummary, SentinelError> {
         use sqlx::Row;
-        let from = from.unwrap_or("");
-        let to = to.unwrap_or("");
+        // Normalized to a second-resolution UTC key, like the audit export.
+        // The raw values were bound straight into a lexical compare on a TEXT
+        // column, so `--from` in any non-UTC offset silently reported $0.00 and
+        // an unparseable value did the same, both with a success exit code.
+        let from =
+            crate::storage::normalize_audit_boundary(from.unwrap_or_default(), "from", false)?;
+        let to = crate::storage::normalize_audit_boundary(to.unwrap_or_default(), "to", true)?;
+        let (from, to) = (from.as_str(), to.as_str());
         let row = sqlx::query(
             "SELECT COALESCE(SUM(cost_usd), 0.0) AS net,
                     COALESCE(SUM(savings_usd), 0.0) AS savings,
@@ -368,7 +393,7 @@ impl AuditStore for SqliteStorage {
                     COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) AS hits,
                     COALESCE(SUM(CASE WHEN usage_json IS NOT NULL THEN 1 ELSE 0 END), 0) AS actions
              FROM audit_events
-             WHERE (? = '' OR timestamp >= ?) AND (? = '' OR timestamp <= ?)",
+             WHERE (? = '' OR substr(timestamp, 1, 19) >= ?) AND (? = '' OR substr(timestamp, 1, 19) <= ?)",
         )
         .bind(from)
         .bind(from)
@@ -425,8 +450,14 @@ impl AuditStore for SqliteStorage {
         bucket: &str,
     ) -> Result<Vec<CostBucket>, SentinelError> {
         use sqlx::Row;
-        let from = from.unwrap_or("");
-        let to = to.unwrap_or("");
+        // Normalized to a second-resolution UTC key, like the audit export.
+        // The raw values were bound straight into a lexical compare on a TEXT
+        // column, so `--from` in any non-UTC offset silently reported $0.00 and
+        // an unparseable value did the same, both with a success exit code.
+        let from =
+            crate::storage::normalize_audit_boundary(from.unwrap_or_default(), "from", false)?;
+        let to = crate::storage::normalize_audit_boundary(to.unwrap_or_default(), "to", true)?;
+        let (from, to) = (from.as_str(), to.as_str());
         // `fmt` is from a fixed allow-list, never user input.
         // The day bucket renders a full timestamp so the label matches the
         // Postgres twin, which always emits YYYY-MM-DDTHH:MM:SSZ via
@@ -447,7 +478,7 @@ impl AuditStore for SqliteStorage {
                     COUNT(*) AS actions
              FROM audit_events
              WHERE usage_json IS NOT NULL
-               AND (? = '' OR timestamp >= ?) AND (? = '' OR timestamp <= ?)
+               AND (? = '' OR substr(timestamp, 1, 19) >= ?) AND (? = '' OR substr(timestamp, 1, 19) <= ?)
              GROUP BY bucket ORDER BY bucket ASC"
         );
         let rows = sqlx::query(&sql)
@@ -482,8 +513,14 @@ impl SqliteStorage {
         limit: u32,
     ) -> Result<Vec<CostByKey>, SentinelError> {
         use sqlx::Row;
-        let from = from.unwrap_or("");
-        let to = to.unwrap_or("");
+        // Normalized to a second-resolution UTC key, like the audit export.
+        // The raw values were bound straight into a lexical compare on a TEXT
+        // column, so `--from` in any non-UTC offset silently reported $0.00 and
+        // an unparseable value did the same, both with a success exit code.
+        let from =
+            crate::storage::normalize_audit_boundary(from.unwrap_or_default(), "from", false)?;
+        let to = crate::storage::normalize_audit_boundary(to.unwrap_or_default(), "to", true)?;
+        let (from, to) = (from.as_str(), to.as_str());
         let sql = format!(
             "SELECT COALESCE({col}, '') AS k,
                     COALESCE(SUM(cost_usd), 0.0) AS net,
@@ -493,7 +530,7 @@ impl SqliteStorage {
                     COALESCE(SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END), 0) AS hits
              FROM audit_events
              WHERE usage_json IS NOT NULL
-               AND (? = '' OR timestamp >= ?) AND (? = '' OR timestamp <= ?)
+               AND (? = '' OR substr(timestamp, 1, 19) >= ?) AND (? = '' OR substr(timestamp, 1, 19) <= ?)
              GROUP BY {col} ORDER BY net DESC, k ASC LIMIT ?",
             col = column
         );
@@ -632,14 +669,41 @@ impl ReviewStore for SqliteStorage {
         Ok(row.into_review())
     }
 
+    /// Resolving a review is terminal.
+    ///
+    /// This was an unconditional UPDATE with no state-machine guard and no
+    /// history, so an admin key could approve a request, let the console show it
+    /// as settled, and then rewrite the same request to `rejected` — two `200 OK`
+    /// responses, one surviving row, and nothing anywhere recording that the
+    /// decision had ever been anything else. On a product whose deliverable is
+    /// the evidence record, a human-in-the-loop decision that can be silently
+    /// rewritten is not a record.
+    ///
+    /// The guard is in the WHERE clause rather than a read-then-write, so two
+    /// concurrent resolutions cannot both win: exactly one updates a row, and
+    /// the loser is told what the decision already is.
     async fn update_status(&self, id: &str, status: &str) -> Result<ReviewRequest, SentinelError> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("UPDATE review_requests SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(status)
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE review_requests SET status = ?, updated_at = ?
+             WHERE id = ? AND status = 'pending'",
+        )
+        .bind(status)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // `get` distinguishes the two ways to affect no rows: it returns
+            // ReviewNotFound for an unknown id, so reaching past it means the
+            // row exists and is already resolved.
+            let existing = self.get(id).await?;
+            return Err(SentinelError::InvalidRequest(format!(
+                "review {id} was already resolved as {}; a resolution is final",
+                existing.status
+            )));
+        }
 
         self.get(id).await
     }
@@ -1085,7 +1149,7 @@ impl ApiKeyStore for SqliteStorage {
     async fn list_keys(&self) -> Result<Vec<ApiKeyRecord>, SentinelError> {
         let rows = sqlx::query_as::<_, ApiKeyRow>(
             // `created_at` is a whole-second default here too; `id` is the PK.
-            "SELECT id, label, created_at, scope FROM api_keys ORDER BY created_at DESC, id DESC",
+            "SELECT id, label, created_at, scope, agent_id FROM api_keys ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1096,6 +1160,7 @@ impl ApiKeyStore for SqliteStorage {
                 label: r.label,
                 created_at: r.created_at,
                 scope: r.scope,
+                agent_id: r.agent_id,
             })
             .collect())
     }
@@ -1107,16 +1172,18 @@ impl ApiKeyStore for SqliteStorage {
         label: &str,
         raw_key: &str,
         scope: KeyScope,
+        agent_id: Option<&str>,
     ) -> Result<(), SentinelError> {
         let prefix = &raw_key[..raw_key.len().min(8)];
         sqlx::query(
-            "INSERT INTO api_keys (id, key_hash, key_prefix, label, scope) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO api_keys (id, key_hash, key_prefix, label, scope, agent_id) VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(key_id)
         .bind(key_hash)
         .bind(prefix)
         .bind(label)
         .bind(scope.as_str())
+        .bind(agent_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1127,18 +1194,19 @@ impl ApiKeyStore for SqliteStorage {
         raw_key: &str,
     ) -> Result<Option<VerifiedKey>, SentinelError> {
         let prefix = &raw_key[..raw_key.len().min(8)];
-        let candidates = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT id, key_hash, scope FROM api_keys WHERE key_prefix = ?",
+        let candidates = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+            "SELECT id, key_hash, scope, agent_id FROM api_keys WHERE key_prefix = ?",
         )
         .bind(prefix)
         .fetch_all(&self.pool)
         .await?;
 
-        for (id, stored_hash, scope) in &candidates {
+        for (id, stored_hash, scope, agent_id) in &candidates {
             if crate::auth::api_keys::verify_key(raw_key, stored_hash) {
                 return Ok(Some(VerifiedKey {
                     key_id: Some(id.clone()),
                     scope: KeyScope::from_db(scope),
+                    agent_id: agent_id.clone(),
                 }));
             }
         }
@@ -1151,6 +1219,7 @@ struct ApiKeyRow {
     label: String,
     created_at: String,
     scope: String,
+    agent_id: Option<String>,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ApiKeyRow {
@@ -1165,80 +1234,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ApiKeyRow {
             scope: row
                 .try_get("scope")
                 .unwrap_or_else(|_| KeyScope::Admin.as_str().to_string()),
+            agent_id: row.try_get("agent_id").unwrap_or(None),
         })
-    }
-}
-
-// ── TenantStore ──
-
-#[async_trait]
-impl TenantStore for SqliteStorage {
-    async fn create_tenant(&self, tenant: &Tenant) -> Result<(), SentinelError> {
-        let metadata = tenant
-            .metadata
-            .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap_or_default());
-        sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, enabled, metadata, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&tenant.tenant_id)
-        .bind(&tenant.name)
-        .bind(tenant.enabled)
-        .bind(&metadata)
-        .bind(&tenant.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn get_tenant(&self, tenant_id: &str) -> Result<Tenant, SentinelError> {
-        use sqlx::Row;
-        let row = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata, created_at FROM tenants WHERE tenant_id = ?",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| SentinelError::Storage(format!("Tenant not found: {tenant_id}")))?;
-
-        let metadata_str: Option<String> = row.try_get("metadata").unwrap_or(None);
-        Ok(Tenant {
-            tenant_id: row.try_get("tenant_id")?,
-            name: row.try_get("name")?,
-            enabled: row.try_get::<bool, _>("enabled").unwrap_or(true),
-            created_at: row.try_get("created_at")?,
-            metadata: metadata_str.and_then(|s| parse_json_opt_or_warn(&s, "tenants.metadata")),
-        })
-    }
-
-    async fn list_tenants(&self) -> Result<Vec<Tenant>, SentinelError> {
-        use sqlx::Row;
-        let rows = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata, created_at FROM tenants ORDER BY created_at, tenant_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut tenants = Vec::new();
-        for row in &rows {
-            let metadata_str: Option<String> = row.try_get("metadata").unwrap_or(None);
-            tenants.push(Tenant {
-                tenant_id: row.try_get("tenant_id")?,
-                name: row.try_get("name")?,
-                enabled: row.try_get::<bool, _>("enabled").unwrap_or(true),
-                created_at: row.try_get("created_at")?,
-                metadata: metadata_str.and_then(|s| parse_json_opt_or_warn(&s, "tenants.metadata")),
-            });
-        }
-        Ok(tenants)
-    }
-
-    async fn delete_tenant(&self, tenant_id: &str) -> Result<(), SentinelError> {
-        sqlx::query("DELETE FROM tenants WHERE tenant_id = ?")
-            .bind(tenant_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 }
 
@@ -1419,6 +1416,112 @@ impl NhiStore for SqliteStorage {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() as usize)
+    }
+
+    async fn store_capability_token(
+        &self,
+        token: &crate::modules::nhi::crypto_identity::CapabilityToken,
+    ) -> Result<(), SentinelError> {
+        let capabilities = serde_json::to_string(&token.capabilities).unwrap_or_default();
+        sqlx::query(
+            "INSERT INTO capability_tokens
+                (token_id, agent_id, capabilities, issued_at, expires_at, signature, valid)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(token_id) DO UPDATE SET valid = excluded.valid",
+        )
+        .bind(&token.token_id)
+        .bind(&token.agent_id)
+        .bind(&capabilities)
+        .bind(&token.issued_at)
+        .bind(&token.expires_at)
+        .bind(&token.signature)
+        .bind(token.valid)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_capability_token(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<crate::modules::nhi::crypto_identity::CapabilityToken>, SentinelError> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT token_id, agent_id, capabilities, issued_at, expires_at, signature, valid
+             FROM capability_tokens WHERE token_id = ?",
+        )
+        .bind(token_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            let caps_str: String = r.try_get("capabilities").unwrap_or_default();
+            crate::modules::nhi::crypto_identity::CapabilityToken {
+                token_id: r.try_get("token_id").unwrap_or_default(),
+                agent_id: r.try_get("agent_id").unwrap_or_default(),
+                capabilities: crate::storage::parse_json_or_warn(
+                    &caps_str,
+                    "capability_tokens.capabilities",
+                ),
+                issued_at: r.try_get("issued_at").unwrap_or_default(),
+                expires_at: r.try_get("expires_at").unwrap_or_default(),
+                signature: r.try_get("signature").unwrap_or_default(),
+                // Fail CLOSED on a decode error: an unreadable `valid` column
+                // must not read as "still valid".
+                valid: r.try_get::<bool, _>("valid").unwrap_or(false),
+            }
+        }))
+    }
+
+    async fn revoke_capability_token(&self, token_id: &str) -> Result<bool, SentinelError> {
+        let result = sqlx::query("UPDATE capability_tokens SET valid = 0 WHERE token_id = ?")
+            .bind(token_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn prune_expired_capability_tokens(&self) -> Result<usize, SentinelError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query("DELETE FROM capability_tokens WHERE expires_at < ?")
+            .bind(&now)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn list_capability_tokens(
+        &self,
+    ) -> Result<Vec<crate::storage::traits::CapabilityTokenRecord>, SentinelError> {
+        use sqlx::Row;
+        // `signature` is deliberately absent from the projection, not filtered
+        // out afterwards: a column never read cannot be leaked by a later edit.
+        // Ordered newest-first with a total order on ties, the same rule the
+        // audit read uses, so repeated reads are byte-identical.
+        let rows = sqlx::query(
+            "SELECT token_id, agent_id, capabilities, issued_at, expires_at, valid
+             FROM capability_tokens ORDER BY issued_at DESC, token_id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let caps: String = r.try_get("capabilities").unwrap_or_default();
+                crate::storage::traits::CapabilityTokenRecord {
+                    token_id: r.try_get("token_id").unwrap_or_default(),
+                    agent_id: r.try_get("agent_id").unwrap_or_default(),
+                    capabilities: crate::storage::parse_json_or_warn(
+                        &caps,
+                        "capability_tokens.capabilities",
+                    ),
+                    issued_at: r.try_get("issued_at").unwrap_or_default(),
+                    expires_at: r.try_get("expires_at").unwrap_or_default(),
+                    valid: r.try_get::<i64, _>("valid").unwrap_or(0) != 0,
+                }
+            })
+            .collect())
     }
 }
 
@@ -1742,7 +1845,9 @@ impl RateLimitStore for SqliteStorage {
         match row {
             Some(r) => Ok(Some(RateLimitConfig {
                 max_per_minute: r.try_get::<i64, _>("max_per_minute").unwrap_or(60) as u32,
-                max_per_hour: r.try_get::<i64, _>("max_per_hour").unwrap_or(600) as u32,
+                // 1000: see the Postgres twin. The two backends agreed with
+                // each other and with nothing else.
+                max_per_hour: r.try_get::<i64, _>("max_per_hour").unwrap_or(1000) as u32,
                 burst_limit: r.try_get::<i64, _>("burst_limit").unwrap_or(10) as u32,
             })),
             None => Ok(None),

@@ -161,11 +161,24 @@ impl AuditStore for PostgresStorage {
         &self,
         filter: &AuditExportFilter,
     ) -> Result<Vec<StoredAuditEvent>, SentinelError> {
-        let limit = filter.limit.unwrap_or(1000) as i64;
+        let limit = filter
+            .limit
+            .unwrap_or(1000)
+            .min(crate::storage::MAX_AUDIT_EXPORT_ROWS) as i64;
         let agent = filter.agent_id.clone().unwrap_or_default();
         let decision = filter.decision.clone().unwrap_or_default();
-        let from = filter.from_date.clone().unwrap_or_default();
-        let to = filter.to_date.clone().unwrap_or_default();
+        // Same normalization as the SQLite twin: `timestamp` is TEXT here too,
+        // so the raw bind was an equally lexical compare.
+        let from = crate::storage::normalize_audit_boundary(
+            filter.from_date.as_deref().unwrap_or_default(),
+            "from_date",
+            false,
+        )?;
+        let to = crate::storage::normalize_audit_boundary(
+            filter.to_date.as_deref().unwrap_or_default(),
+            "to_date",
+            true,
+        )?;
         let tenant = filter.tenant_id.clone().unwrap_or_default();
 
         let rows = sqlx::query(
@@ -173,8 +186,8 @@ impl AuditStore for PostgresStorage {
              FROM audit_events
              WHERE ($1 = '' OR agent_id = $1)
                AND ($2 = '' OR decision = $2)
-               AND ($3 = '' OR timestamp >= $3)
-               AND ($4 = '' OR timestamp <= $4)
+               AND ($3 = '' OR substr(timestamp, 1, 19) >= $3)
+               AND ($4 = '' OR substr(timestamp, 1, 19) <= $4)
                AND ($5 = '' OR tenant_id = $5)
              ORDER BY created_at DESC, event_id DESC LIMIT $6"
         )
@@ -266,13 +279,20 @@ impl AuditStore for PostgresStorage {
 
         let agent_filter = agent_id.unwrap_or("");
 
+        // Three grouped queries, not one plus N per agent. `decisions_csv` was
+        // selected here and never read on either backend -- the decisions map was
+        // always built by a separate per-agent round trip.
+        //
+        // `COUNT(*)` is BIGINT and `AVG(risk_score)` over an INTEGER column is
+        // NUMERIC, so both carry an explicit cast: sqlx type-checks Postgres
+        // decodes strictly, and a mismatch here would be decoded into the
+        // `unwrap_or` fallback silently. That is exactly how 2.0.1 shipped every
+        // Postgres workspace governed at the default thresholds.
         let rows = sqlx::query(
             "SELECT agent_id,
-                    COUNT(*) as total,
+                    COUNT(*)::bigint as total,
                     AVG(risk_score)::double precision as avg_risk,
-                    MAX(timestamp) as last_ts,
-                    STRING_AGG(DISTINCT decision, ',') as decisions_csv,
-                    STRING_AGG(tool_name, ',') as tools_csv
+                    MAX(timestamp) as last_ts
              FROM audit_events
              WHERE $1 = '' OR agent_id = $1
              GROUP BY agent_id
@@ -282,54 +302,60 @@ impl AuditStore for PostgresStorage {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut results = Vec::new();
-        for row in &rows {
-            let aid: String = row.try_get("agent_id").unwrap_or_default();
-            let total: i64 = row.try_get("total").unwrap_or(0);
-            let avg_risk: f64 = row.try_get("avg_risk").unwrap_or(0.0);
-            let last_ts: String = row.try_get("last_ts").unwrap_or_default();
-            let tools_csv: String = row.try_get("tools_csv").unwrap_or_default();
+        let totals: Vec<crate::storage::AgentTotalsRow> = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("agent_id").unwrap_or_default(),
+                    row.try_get::<i64, _>("total").unwrap_or(0) as u64,
+                    row.try_get::<f64, _>("avg_risk").unwrap_or(0.0),
+                    row.try_get::<String, _>("last_ts").unwrap_or_default(),
+                )
+            })
+            .collect();
 
-            let decision_rows = sqlx::query(
-                "SELECT decision, COUNT(*) as cnt FROM audit_events WHERE agent_id = $1 GROUP BY decision",
-            )
-            .bind(&aid)
-            .fetch_all(&self.pool)
-            .await?;
+        let decision_rows = sqlx::query(
+            "SELECT agent_id, decision, COUNT(*)::bigint as cnt
+             FROM audit_events
+             WHERE $1 = '' OR agent_id = $1
+             GROUP BY agent_id, decision",
+        )
+        .bind(agent_filter)
+        .fetch_all(&self.pool)
+        .await?;
 
-            let mut decisions = std::collections::HashMap::new();
-            for dr in &decision_rows {
-                let d: String = dr.try_get("decision").unwrap_or_default();
-                let c: i64 = dr.try_get("cnt").unwrap_or(0);
-                decisions.insert(d, c as u64);
-            }
+        // Bounded by DISTINCT (agent, tool) pairs rather than by event count.
+        // The top-5 cut is applied in `fold_agent_analytics`, which is why this
+        // is not a per-agent `LIMIT 5`.
+        let tool_rows = sqlx::query(
+            "SELECT agent_id, tool_name, COUNT(*)::bigint as cnt
+             FROM audit_events
+             WHERE $1 = '' OR agent_id = $1
+             GROUP BY agent_id, tool_name
+             ORDER BY cnt DESC, tool_name ASC",
+        )
+        .bind(agent_filter)
+        .fetch_all(&self.pool)
+        .await?;
 
-            let mut tool_counts: std::collections::HashMap<String, u64> =
-                std::collections::HashMap::new();
-            for tool in tools_csv.split(',') {
-                let t = tool.trim().to_string();
-                if !t.is_empty() {
-                    *tool_counts.entry(t).or_insert(0) += 1;
-                }
-            }
-            let mut top_tools: Vec<(String, u64)> = tool_counts.into_iter().collect();
-            top_tools.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-            top_tools.truncate(5);
+        let as_counts =
+            |rows: &[sqlx::postgres::PgRow], key: &str| -> Vec<crate::storage::AgentCountRow> {
+                rows.iter()
+                    .map(|row| {
+                        (
+                            row.try_get::<String, _>("agent_id").unwrap_or_default(),
+                            row.try_get::<String, _>(key).unwrap_or_default(),
+                            row.try_get::<i64, _>("cnt").unwrap_or(0) as u64,
+                        )
+                    })
+                    .collect()
+            };
 
-            let trust = crate::modules::nhi::crypto_identity::get_agent_trust(&aid);
-
-            results.push(AgentAnalytics {
-                agent_id: aid,
-                total_requests: total as u64,
-                decisions,
-                avg_risk_score: avg_risk,
-                top_tools,
-                last_activity: last_ts,
-                trust_score: trust,
-            });
-        }
-
-        Ok(results)
+        Ok(crate::storage::fold_agent_analytics(
+            totals,
+            as_counts(&decision_rows, "decision"),
+            as_counts(&tool_rows, "tool_name"),
+        ))
     }
 
     async fn cost_summary(
@@ -338,8 +364,14 @@ impl AuditStore for PostgresStorage {
         to: Option<&str>,
     ) -> Result<CostSummary, SentinelError> {
         use sqlx::Row;
-        let from = from.unwrap_or("");
-        let to = to.unwrap_or("");
+        // Normalized to a second-resolution UTC key, like the audit export.
+        // The raw values were bound straight into a lexical compare on a TEXT
+        // column, so `--from` in any non-UTC offset silently reported $0.00 and
+        // an unparseable value did the same, both with a success exit code.
+        let from =
+            crate::storage::normalize_audit_boundary(from.unwrap_or_default(), "from", false)?;
+        let to = crate::storage::normalize_audit_boundary(to.unwrap_or_default(), "to", true)?;
+        let (from, to) = (from.as_str(), to.as_str());
         let row = sqlx::query(
             "SELECT COALESCE(SUM(cost_usd), 0.0)::double precision AS net,
                     COALESCE(SUM(savings_usd), 0.0)::double precision AS savings,
@@ -347,7 +379,7 @@ impl AuditStore for PostgresStorage {
                     COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END), 0)::bigint AS hits,
                     COALESCE(SUM(CASE WHEN usage_json IS NOT NULL THEN 1 ELSE 0 END), 0)::bigint AS actions
              FROM audit_events
-             WHERE ($1 = '' OR timestamp >= $1) AND ($2 = '' OR timestamp <= $2)",
+             WHERE ($1 = '' OR substr(timestamp, 1, 19) >= $1) AND ($2 = '' OR substr(timestamp, 1, 19) <= $2)",
         )
         .bind(from)
         .bind(to)
@@ -402,8 +434,14 @@ impl AuditStore for PostgresStorage {
         bucket: &str,
     ) -> Result<Vec<CostBucket>, SentinelError> {
         use sqlx::Row;
-        let from = from.unwrap_or("");
-        let to = to.unwrap_or("");
+        // Normalized to a second-resolution UTC key, like the audit export.
+        // The raw values were bound straight into a lexical compare on a TEXT
+        // column, so `--from` in any non-UTC offset silently reported $0.00 and
+        // an unparseable value did the same, both with a success exit code.
+        let from =
+            crate::storage::normalize_audit_boundary(from.unwrap_or_default(), "from", false)?;
+        let to = crate::storage::normalize_audit_boundary(to.unwrap_or_default(), "to", true)?;
+        let (from, to) = (from.as_str(), to.as_str());
         let unit = if bucket == "day" { "day" } else { "hour" };
         let rows = sqlx::query(
             "SELECT to_char(date_trunc($1::text, (timestamp)::timestamptz), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS bucket,
@@ -413,7 +451,7 @@ impl AuditStore for PostgresStorage {
                     COUNT(*)::bigint AS actions
              FROM audit_events
              WHERE usage_json IS NOT NULL
-               AND ($2 = '' OR timestamp >= $2) AND ($3 = '' OR timestamp <= $3)
+               AND ($2 = '' OR substr(timestamp, 1, 19) >= $2) AND ($3 = '' OR substr(timestamp, 1, 19) <= $3)
              GROUP BY bucket ORDER BY bucket ASC",
         )
         .bind(unit)
@@ -446,8 +484,14 @@ impl PostgresStorage {
         limit: u32,
     ) -> Result<Vec<CostByKey>, SentinelError> {
         use sqlx::Row;
-        let from = from.unwrap_or("");
-        let to = to.unwrap_or("");
+        // Normalized to a second-resolution UTC key, like the audit export.
+        // The raw values were bound straight into a lexical compare on a TEXT
+        // column, so `--from` in any non-UTC offset silently reported $0.00 and
+        // an unparseable value did the same, both with a success exit code.
+        let from =
+            crate::storage::normalize_audit_boundary(from.unwrap_or_default(), "from", false)?;
+        let to = crate::storage::normalize_audit_boundary(to.unwrap_or_default(), "to", true)?;
+        let (from, to) = (from.as_str(), to.as_str());
         let sql = format!(
             "SELECT COALESCE({col}, '') AS k,
                     COALESCE(SUM(cost_usd), 0.0)::double precision AS net,
@@ -457,7 +501,7 @@ impl PostgresStorage {
                     COALESCE(SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END), 0)::bigint AS hits
              FROM audit_events
              WHERE usage_json IS NOT NULL
-               AND ($1 = '' OR timestamp >= $1) AND ($2 = '' OR timestamp <= $2)
+               AND ($1 = '' OR substr(timestamp, 1, 19) >= $1) AND ($2 = '' OR substr(timestamp, 1, 19) <= $2)
              GROUP BY {col} ORDER BY net DESC, k ASC LIMIT $3",
             col = column
         );
@@ -527,14 +571,26 @@ impl ReviewStore for PostgresStorage {
         Ok(pg_row_to_review(&row))
     }
 
+    /// Resolving a review is terminal. See the SQLite twin for why.
     async fn update_status(&self, id: &str, status: &str) -> Result<ReviewRequest, SentinelError> {
         let now = chrono::Utc::now().to_rfc3339();
-        sqlx::query("UPDATE review_requests SET status = $1, updated_at = $2 WHERE id = $3")
-            .bind(status)
-            .bind(&now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE review_requests SET status = $1, updated_at = $2
+             WHERE id = $3 AND status = 'pending'",
+        )
+        .bind(status)
+        .bind(&now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            let existing = self.get(id).await?;
+            return Err(SentinelError::InvalidRequest(format!(
+                "review {id} was already resolved as {}; a resolution is final",
+                existing.status
+            )));
+        }
 
         self.get(id).await
     }
@@ -802,7 +858,7 @@ impl ApiKeyStore for PostgresStorage {
     async fn list_keys(&self) -> Result<Vec<ApiKeyRecord>, SentinelError> {
         use sqlx::Row;
         let rows = sqlx::query(
-            "SELECT id, label, created_at::text, scope FROM api_keys ORDER BY created_at DESC, id DESC",
+            "SELECT id, label, created_at::text, scope, agent_id FROM api_keys ORDER BY created_at DESC, id DESC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -817,6 +873,7 @@ impl ApiKeyStore for PostgresStorage {
                 scope: r
                     .try_get("scope")
                     .unwrap_or_else(|_| KeyScope::Admin.as_str().to_string()),
+                agent_id: r.try_get("agent_id").unwrap_or(None),
             })
             .collect())
     }
@@ -828,16 +885,18 @@ impl ApiKeyStore for PostgresStorage {
         label: &str,
         raw_key: &str,
         scope: KeyScope,
+        agent_id: Option<&str>,
     ) -> Result<(), SentinelError> {
         let prefix = &raw_key[..raw_key.len().min(8)];
         sqlx::query(
-            "INSERT INTO api_keys (id, key_hash, key_prefix, label, scope) VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO api_keys (id, key_hash, key_prefix, label, scope, agent_id) VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(key_id)
         .bind(key_hash)
         .bind(prefix)
         .bind(label)
         .bind(scope.as_str())
+        .bind(agent_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -848,95 +907,23 @@ impl ApiKeyStore for PostgresStorage {
         raw_key: &str,
     ) -> Result<Option<VerifiedKey>, SentinelError> {
         let prefix = &raw_key[..raw_key.len().min(8)];
-        let candidates = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT id, key_hash, scope FROM api_keys WHERE key_prefix = $1",
+        let candidates = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+            "SELECT id, key_hash, scope, agent_id FROM api_keys WHERE key_prefix = $1",
         )
         .bind(prefix)
         .fetch_all(&self.pool)
         .await?;
 
-        for (id, stored_hash, scope) in &candidates {
+        for (id, stored_hash, scope, agent_id) in &candidates {
             if crate::auth::api_keys::verify_key(raw_key, stored_hash) {
                 return Ok(Some(VerifiedKey {
                     key_id: Some(id.clone()),
                     scope: KeyScope::from_db(scope),
+                    agent_id: agent_id.clone(),
                 }));
             }
         }
         Ok(None)
-    }
-}
-
-// ── TenantStore ──
-
-#[async_trait]
-impl TenantStore for PostgresStorage {
-    async fn create_tenant(&self, tenant: &Tenant) -> Result<(), SentinelError> {
-        let metadata = tenant
-            .metadata
-            .as_ref()
-            .map(|m| serde_json::to_string(m).unwrap_or_default());
-        sqlx::query(
-            "INSERT INTO tenants (tenant_id, name, enabled, metadata, created_at) VALUES ($1, $2, $3, $4::jsonb, $5)",
-        )
-        .bind(&tenant.tenant_id)
-        .bind(&tenant.name)
-        .bind(tenant.enabled)
-        .bind(&metadata)
-        .bind(&tenant.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    async fn get_tenant(&self, tenant_id: &str) -> Result<Tenant, SentinelError> {
-        use sqlx::Row;
-        let row = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata::text, created_at::text FROM tenants WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| SentinelError::Storage(format!("Tenant not found: {tenant_id}")))?;
-
-        let metadata_str: Option<String> = row.try_get("metadata").unwrap_or(None);
-        Ok(Tenant {
-            tenant_id: row.try_get("tenant_id")?,
-            name: row.try_get("name")?,
-            enabled: row.try_get::<bool, _>("enabled").unwrap_or(true),
-            created_at: row.try_get("created_at")?,
-            metadata: metadata_str.and_then(|s| parse_json_opt_or_warn(&s, "tenants.metadata")),
-        })
-    }
-
-    async fn list_tenants(&self) -> Result<Vec<Tenant>, SentinelError> {
-        use sqlx::Row;
-        let rows = sqlx::query(
-            "SELECT tenant_id, name, enabled, metadata::text, created_at::text FROM tenants ORDER BY created_at, tenant_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut tenants = Vec::new();
-        for row in &rows {
-            let metadata_str: Option<String> = row.try_get("metadata").unwrap_or(None);
-            tenants.push(Tenant {
-                tenant_id: row.try_get("tenant_id")?,
-                name: row.try_get("name")?,
-                enabled: row.try_get::<bool, _>("enabled").unwrap_or(true),
-                created_at: row.try_get("created_at")?,
-                metadata: metadata_str.and_then(|s| parse_json_opt_or_warn(&s, "tenants.metadata")),
-            });
-        }
-        Ok(tenants)
-    }
-
-    async fn delete_tenant(&self, tenant_id: &str) -> Result<(), SentinelError> {
-        sqlx::query("DELETE FROM tenants WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 }
 
@@ -1133,9 +1120,14 @@ impl NhiStore for PostgresStorage {
     ) -> Result<(), SentinelError> {
         let capabilities = serde_json::to_string(&identity.capabilities).unwrap_or_default();
 
+        // `created_at` is BOUND, not `NOW()`. It was the write time here and the
+        // mint time on SQLite (`crypto_identity` stamps
+        // `Utc::now().to_rfc3339()` when the identity is created), so the same
+        // identity carried two different values depending on the backend.
+        // `ON CONFLICT` still omits it, so a re-store preserves the original.
         sqlx::query(
             "INSERT INTO nhi_identities (agent_id, spiffe_id, public_key_hex, secret_key_hex, attestation_status, trust_score, capabilities, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
+             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::timestamptz, NOW())
              ON CONFLICT(agent_id) DO UPDATE SET
                 spiffe_id = EXCLUDED.spiffe_id,
                 public_key_hex = EXCLUDED.public_key_hex,
@@ -1152,6 +1144,7 @@ impl NhiStore for PostgresStorage {
         .bind(&identity.attestation_status)
         .bind(identity.trust_score)
         .bind(&capabilities)
+        .bind(&identity.created_at)
         .execute(&self.pool)
         .await?;
 
@@ -1162,7 +1155,8 @@ impl NhiStore for PostgresStorage {
         use sqlx::Row;
 
         let row = sqlx::query(
-            "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities::text, created_at::text
+            "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities::text,
+                    to_char(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') as created_at
              FROM nhi_identities WHERE agent_id = $1"
         )
         .bind(agent_id)
@@ -1198,7 +1192,8 @@ impl NhiStore for PostgresStorage {
         use sqlx::Row;
 
         let rows = sqlx::query(
-            "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities::text, created_at::text
+            "SELECT agent_id, spiffe_id, public_key_hex, attestation_status, trust_score, capabilities::text,
+                    to_char(created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') as created_at
              FROM nhi_identities ORDER BY created_at, agent_id"
         )
         .fetch_all(&self.pool)
@@ -1298,6 +1293,119 @@ impl NhiStore for PostgresStorage {
             .await?;
 
         Ok(result.rows_affected() as usize)
+    }
+
+    async fn store_capability_token(
+        &self,
+        token: &crate::modules::nhi::crypto_identity::CapabilityToken,
+    ) -> Result<(), SentinelError> {
+        let capabilities = serde_json::to_string(&token.capabilities).unwrap_or_default();
+        // `issued_at`/`expires_at` are TIMESTAMPTZ here and TEXT on SQLite, so
+        // they are cast on the way in and rendered back to RFC3339 on the way
+        // out. Doing it any other way is what made `nhi_identities.created_at`
+        // come back as `2026-08-19 12:34:56+00` on one backend and RFC3339 on
+        // the other.
+        sqlx::query(
+            "INSERT INTO capability_tokens
+                (token_id, agent_id, capabilities, issued_at, expires_at, signature, valid)
+             VALUES ($1, $2, $3::jsonb, $4::timestamptz, $5::timestamptz, $6, $7)
+             ON CONFLICT(token_id) DO UPDATE SET valid = EXCLUDED.valid",
+        )
+        .bind(&token.token_id)
+        .bind(&token.agent_id)
+        .bind(&capabilities)
+        .bind(&token.issued_at)
+        .bind(&token.expires_at)
+        .bind(&token.signature)
+        .bind(token.valid)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_capability_token(
+        &self,
+        token_id: &str,
+    ) -> Result<Option<crate::modules::nhi::crypto_identity::CapabilityToken>, SentinelError> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT token_id, agent_id, capabilities::text as capabilities,
+                    to_char(issued_at,  'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') as issued_at,
+                    to_char(expires_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') as expires_at,
+                    signature, valid
+             FROM capability_tokens WHERE token_id = $1",
+        )
+        .bind(token_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            let caps_str: String = r.try_get("capabilities").unwrap_or_default();
+            crate::modules::nhi::crypto_identity::CapabilityToken {
+                token_id: r.try_get("token_id").unwrap_or_default(),
+                agent_id: r.try_get("agent_id").unwrap_or_default(),
+                capabilities: crate::storage::parse_json_or_warn(
+                    &caps_str,
+                    "capability_tokens.capabilities",
+                ),
+                issued_at: r.try_get("issued_at").unwrap_or_default(),
+                expires_at: r.try_get("expires_at").unwrap_or_default(),
+                signature: r.try_get("signature").unwrap_or_default(),
+                // Fail CLOSED on a decode error.
+                valid: r.try_get::<bool, _>("valid").unwrap_or(false),
+            }
+        }))
+    }
+
+    async fn revoke_capability_token(&self, token_id: &str) -> Result<bool, SentinelError> {
+        let result = sqlx::query("UPDATE capability_tokens SET valid = FALSE WHERE token_id = $1")
+            .bind(token_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn prune_expired_capability_tokens(&self) -> Result<usize, SentinelError> {
+        let result = sqlx::query("DELETE FROM capability_tokens WHERE expires_at < NOW()")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn list_capability_tokens(
+        &self,
+    ) -> Result<Vec<crate::storage::traits::CapabilityTokenRecord>, SentinelError> {
+        use sqlx::Row;
+        // Same shape as the SQLite twin: no `signature` in the projection, and
+        // the timestamps rendered through the six-digit `to_char` this table
+        // needs everywhere else (`TIMESTAMPTZ` here, `TEXT` there).
+        let rows = sqlx::query(
+            "SELECT token_id, agent_id, capabilities::text as capabilities,
+                    to_char(issued_at,  'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') as issued_at,
+                    to_char(expires_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') as expires_at,
+                    valid
+             FROM capability_tokens ORDER BY issued_at DESC, token_id DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let caps: String = r.try_get("capabilities").unwrap_or_default();
+                crate::storage::traits::CapabilityTokenRecord {
+                    token_id: r.try_get("token_id").unwrap_or_default(),
+                    agent_id: r.try_get("agent_id").unwrap_or_default(),
+                    capabilities: crate::storage::parse_json_or_warn(
+                        &caps,
+                        "capability_tokens.capabilities",
+                    ),
+                    issued_at: r.try_get("issued_at").unwrap_or_default(),
+                    expires_at: r.try_get("expires_at").unwrap_or_default(),
+                    valid: r.try_get("valid").unwrap_or(false),
+                }
+            })
+            .collect())
     }
 }
 
@@ -1542,7 +1650,12 @@ impl RateLimitStore for PostgresStorage {
 
         Ok(row.map(|r| {
             let mpm: i32 = r.try_get("max_per_minute").unwrap_or(60);
-            let mph: i32 = r.try_get("max_per_hour").unwrap_or(600);
+            // 1000, matching `RateLimitConfig::default()` and the column
+            // DEFAULT. 600 here meant a row that failed to decode was
+            // silently governed at a limit no document mentions -- the same
+            // shape as the 2.0.2 defect where Postgres read the thresholds
+            // as the wrong type and governed every workspace at 70/35.
+            let mph: i32 = r.try_get("max_per_hour").unwrap_or(1000);
             let bl: i32 = r.try_get("burst_limit").unwrap_or(10);
             RateLimitConfig {
                 max_per_minute: mpm as u32,

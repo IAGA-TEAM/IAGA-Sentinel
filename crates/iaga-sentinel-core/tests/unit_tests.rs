@@ -260,6 +260,152 @@ fn test_taint_classify_source_http_internal() {
 }
 
 #[test]
+fn test_taint_http_decimal_in_body_is_not_internal_api() {
+    let labels = classify_source(
+        "http",
+        "http.fetch",
+        r#"{"destination":"https://api.stripe.com/v1/charges","body":"{\"amount\":\"10.50\"}"}"#,
+    );
+    assert!(
+        !labels.contains(&INTERNAL_API.to_string()),
+        "a decimal in the request body is not an internal destination: {labels:?}"
+    );
+    assert!(
+        labels.contains(&EXTERNAL_TOOL.to_string()),
+        "a public host must classify as external_tool: {labels:?}"
+    );
+}
+
+#[test]
+fn test_taint_benign_http_body_does_not_signal_exfiltration() {
+    let result = analyze_taint(
+        "http",
+        "http.fetch",
+        r#"{"destination":"https://api.stripe.com/v1/charges","body":"invoice total 10.50 USD"}"#,
+        &HashSet::new(),
+    );
+    assert!(
+        !result.blocked,
+        "a benign POST to an external host must not be blocked: {}",
+        result.summary
+    );
+    assert!(
+        !result.exfiltration_detected,
+        "no exfiltration evidence may be signed for benign traffic: {}",
+        result.summary
+    );
+}
+
+#[test]
+fn test_taint_http_prose_mentioning_local_is_not_internal_api() {
+    let labels = classify_source(
+        "http",
+        "http.fetch",
+        r#"{"url":"https://api.github.com/repos","body":"see config.local.json in the acme.corp handbook"}"#,
+    );
+    assert!(
+        !labels.contains(&INTERNAL_API.to_string()),
+        ".local/.corp in prose is not an internal destination: {labels:?}"
+    );
+}
+
+#[test]
+fn test_taint_http_private_destination_is_still_internal_api() {
+    for destination in [
+        r#"{"destination":"http://10.0.0.7:8080/admin"}"#,
+        r#"{"url":"http://192.168.1.5/status"}"#,
+        r#"{"endpoint":"https://billing.internal/v1"}"#,
+        r#"{"uri":"http://127.0.0.53/metrics"}"#,
+    ] {
+        let labels = classify_source("http", "http.fetch", destination);
+        assert!(
+            labels.contains(&INTERNAL_API.to_string()),
+            "a private destination must still be internal_api: {destination} -> {labels:?}"
+        );
+    }
+}
+
+/// A destination is a destination wherever it sits in the payload.
+///
+/// Narrowing the taint scan to the seven `DEFAULT_EGRESS_DESTINATION_FIELDS`
+/// killed a real false positive (a `10.50` payment amount matched `"10."` as a
+/// substring of the whole payload and produced a SIGNED receipt claiming
+/// EXFILTRATION DETECTED). But it only ever looked at the TOP level of the
+/// object and only at STRING values, so the narrowing overshot: a destination
+/// one level down, or inside an array, stopped being seen at all and fell to
+/// the `else` branch -- labelled `EXTERNAL_TOOL`, which fails OPEN.
+///
+/// Every shape below carries one of the seven names with a private host under
+/// it, so every one of them is the case the narrowing was never meant to drop.
+#[test]
+fn test_taint_http_nested_and_array_destinations_are_internal_api() {
+    for payload in [
+        // one level down
+        r#"{"request":{"url":"http://10.0.0.7:8080/admin"}}"#,
+        // two levels down
+        r#"{"outer":{"inner":{"endpoint":"https://billing.internal/v1"}}}"#,
+        // a list of destinations
+        r#"{"url":["http://192.168.1.5/status"]}"#,
+        // a list of request objects
+        r#"[{"uri":"http://127.0.0.53/metrics"}]"#,
+        // the three names no test ever covered
+        r#"{"target":"http://10.0.0.7/"}"#,
+        r#"{"href":"https://svc.local/health"}"#,
+        r#"{"webhook":{"href":"https://hooks.corp/notify"}}"#,
+    ] {
+        let labels = classify_source("http", "http.fetch", payload);
+        assert!(
+            labels.contains(&INTERNAL_API.to_string()),
+            "a private destination must be internal_api wherever it sits: {payload} -> {labels:?}"
+        );
+    }
+}
+
+/// The payment false positive must stay dead UNDER a destination key too.
+///
+/// Found reviewing the recursion against itself: the first cut latched, so once
+/// inside a destination-named key every string below it became a candidate.
+/// `host_of("10.50")` returns `"10.50"`, which matches the `"10."` prefix — so
+/// `{"target":{"amount":"10.50"}}` would have been labelled `INTERNAL_API` and
+/// signed as EXFILTRATION DETECTED, which is the exact defect the narrowing was
+/// written to fix, reborn one level deeper. Arrays still carry the latch (a
+/// list of destinations is a list of destinations); objects re-ask the key.
+#[test]
+fn test_taint_http_a_non_destination_key_under_a_destination_key_is_not_a_host() {
+    for payload in [
+        r#"{"target":{"amount":"10.50"}}"#,
+        r#"{"url":{"version":"3.10.4"}}"#,
+        r#"{"webhook":{"note":"see the acme.corp handbook"}}"#,
+        r#"{"destination":{"items":[{"price":"10.50"}]}}"#,
+    ] {
+        let labels = classify_source("http", "http.fetch", payload);
+        assert!(
+            !labels.contains(&INTERNAL_API.to_string()),
+            "a value under a non-destination key is not a destination: {payload} -> {labels:?}"
+        );
+    }
+}
+
+/// The false positive the narrowing existed to kill must stay dead.
+///
+/// Recursing must not drift back into scanning the whole payload: an amount, a
+/// task id or a sentence of prose is not a destination no matter how deep it is.
+#[test]
+fn test_taint_http_recursion_does_not_reopen_the_payment_false_positive() {
+    for payload in [
+        r#"{"url":"https://api.stripe.com/v1/charges","body":{"amount":"10.50","memo":"see config.local.json"}}"#,
+        r#"{"outer":{"amount":"10.50"},"url":"https://api.github.com/repos"}"#,
+        r#"{"items":[{"price":"10.50"},{"note":"acme.corp handbook"}]}"#,
+    ] {
+        let labels = classify_source("http", "http.fetch", payload);
+        assert!(
+            !labels.contains(&INTERNAL_API.to_string()),
+            "a non-destination value must never be internal_api: {payload} -> {labels:?}"
+        );
+    }
+}
+
+#[test]
 fn test_taint_http_task_id_is_not_secret() {
     let labels = classify_source(
         "http",
@@ -353,6 +499,33 @@ fn test_taint_analyze_untrusted_user_to_shell_blocked() {
     assert!(
         result.blocked,
         "Untrusted user input flowing to shell should be blocked"
+    );
+}
+
+#[test]
+fn test_taint_shell_distinguishes_external_from_internal_http_data() {
+    let external = classify_source(
+        "http",
+        "http.fetch",
+        r#"{"url":"https://downloads.example/archive"}"#,
+    )
+    .into_iter()
+    .collect();
+    let internal = classify_source(
+        "http",
+        "http.fetch",
+        r#"{"url":"https://build.internal/artifact"}"#,
+    )
+    .into_iter()
+    .collect();
+
+    assert!(
+        analyze_taint("shell", "bash", "echo ok", &external).blocked,
+        "external tool data flowing into a shell must remain blocked"
+    );
+    assert!(
+        !analyze_taint("shell", "bash", "echo ok", &internal).blocked,
+        "an internal API call followed by an unrelated shell must remain usable"
     );
 }
 
@@ -820,6 +993,98 @@ fn test_policy_tool_requires_human_review() {
     assert!(
         has_finding,
         "Findings should mention human review requirement"
+    );
+}
+
+/// Everything else here is deliberately permissive so that no OTHER arm of
+/// `evaluate_policy` can produce the Block and hand back a false green: five
+/// arms set Block. `FileRead` keeps the egress tiers out of it, and
+/// `allowed_domains` is empty for the same reason.
+#[test]
+fn test_policy_tool_max_decision_block_is_enforced() {
+    let request = make_request("locked_tool", ActionType::FileRead, HashMap::new());
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["locked_tool"],
+        vec![ActionType::FileRead],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "locked_tool",
+            vec![ActionType::FileRead],
+            false,
+            GovernanceDecision::Block,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec![],
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert_eq!(
+        eval.minimum_decision,
+        GovernanceDecision::Block,
+        "maxDecision: block must deny; formal_verify and `iaga validate` both \
+         already report an all-Block policy as a deny-all"
+    );
+    assert!(
+        eval.findings.iter().any(|f| f.contains("pinned to block")),
+        "the refusal must name the rule that produced it: {:?}",
+        eval.findings
+    );
+}
+
+/// The pre-existing Review arm, which had no test either. Pins that the
+/// monotone merge did not change it.
+#[test]
+fn test_policy_tool_max_decision_review_still_caps_at_review() {
+    let request = make_request("capped_tool", ActionType::FileRead, HashMap::new());
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["capped_tool"],
+        vec![ActionType::FileRead],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "capped_tool",
+            vec![ActionType::FileRead],
+            false,
+            GovernanceDecision::Review,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec![],
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert_eq!(eval.minimum_decision, GovernanceDecision::Review);
+    assert!(eval.findings.iter().any(|f| f.contains("capped at review")));
+}
+
+/// `Allow` must stay inert: the merge is monotone, so it can never LOWER a
+/// stricter decision an earlier arm reached.
+#[test]
+fn test_policy_tool_max_decision_allow_does_not_soften_review() {
+    let request = make_request("review_tool", ActionType::FileRead, HashMap::new());
+    let profile = make_profile(
+        "agent-policy-test",
+        vec!["review_tool"],
+        vec![ActionType::FileRead],
+    );
+    let workspace = make_workspace_policy(
+        vec![make_tool_policy(
+            "review_tool",
+            vec![ActionType::FileRead],
+            true, // requires_human_review raises to Review first
+            GovernanceDecision::Allow,
+        )],
+        vec![ProtocolKind::Mcp],
+        vec![],
+    );
+
+    let eval = evaluate_policy(&request, &profile, &workspace, ProtocolKind::Mcp);
+    assert_eq!(
+        eval.minimum_decision,
+        GovernanceDecision::Review,
+        "maxDecision: allow must not undo an earlier escalation"
     );
 }
 
@@ -1904,20 +2169,96 @@ fn test_nhi_capability_token_lifecycle() {
         crypto_identity::issue_capability_token("test-nhi-token", vec!["read".into()], 3600)
             .expect("Should issue token");
     assert!(token.valid);
-    assert!(crypto_identity::verify_capability_token(
-        &token.token_id,
-        "read"
-    ));
-    assert!(!crypto_identity::verify_capability_token(
-        &token.token_id,
-        "write"
-    ));
+    assert!(crypto_identity::token_grants(&token, "read"));
+    assert!(!crypto_identity::token_grants(&token, "write"));
 
-    crypto_identity::revoke_token(&token.token_id);
-    assert!(!crypto_identity::verify_capability_token(
-        &token.token_id,
-        "read"
-    ));
+    // Revocation is a durable store flag now, not a bit in a process-global
+    // map, so the pure predicate is exercised by flipping the field. The
+    // round trip through storage is covered in `capability_tokens.rs`.
+    let revoked = crypto_identity::CapabilityToken {
+        valid: false,
+        ..token.clone()
+    };
+    assert!(!crypto_identity::token_grants(&revoked, "read"));
+}
+
+/// The check that did not exist before 2.1.0: `signature` was decorative, so a
+/// token was an opaque bearer id and tampering with its fields was undetectable.
+#[test]
+fn test_nhi_capability_token_signature_is_verified() {
+    crypto_identity::register_identity("test-nhi-tamper", None, vec![]);
+    let token =
+        crypto_identity::issue_capability_token("test-nhi-tamper", vec!["read".into()], 3600)
+            .expect("Should issue token");
+    assert!(crypto_identity::verify_token_signature(&token));
+
+    // Escalate the capability list without re-signing.
+    let escalated = crypto_identity::CapabilityToken {
+        capabilities: vec!["*".into()],
+        ..token.clone()
+    };
+    assert!(
+        !crypto_identity::verify_token_signature(&escalated),
+        "widening capabilities must invalidate the signature"
+    );
+    assert!(
+        !crypto_identity::token_grants(&escalated, "read"),
+        "a tampered token must grant nothing, not even what the original did"
+    );
+
+    // Extend the expiry without re-signing.
+    let extended = crypto_identity::CapabilityToken {
+        expires_at: "2099-01-01T00:00:00+00:00".to_string(),
+        ..token.clone()
+    };
+    assert!(!crypto_identity::verify_token_signature(&extended));
+
+    // Point it at a different agent without re-signing.
+    let rebound = crypto_identity::CapabilityToken {
+        agent_id: "someone-else".to_string(),
+        ..token.clone()
+    };
+    assert!(!crypto_identity::verify_token_signature(&rebound));
+}
+
+/// An unparseable expiry used to SKIP the expiry check, producing an immortal
+/// token. It must read as expired instead.
+#[test]
+fn test_nhi_capability_token_unparseable_expiry_is_expired() {
+    crypto_identity::register_identity("test-nhi-badexp", None, vec![]);
+    let token =
+        crypto_identity::issue_capability_token("test-nhi-badexp", vec!["read".into()], 3600)
+            .expect("Should issue token");
+    let corrupt = crypto_identity::CapabilityToken {
+        expires_at: "not-a-timestamp".to_string(),
+        ..token
+    };
+    assert!(!crypto_identity::token_grants(&corrupt, "read"));
+}
+
+/// An already-expired token grants nothing even though it is signed and valid.
+#[test]
+fn test_nhi_capability_token_expiry_is_enforced() {
+    crypto_identity::register_identity("test-nhi-expired", None, vec![]);
+    let token =
+        crypto_identity::issue_capability_token("test-nhi-expired", vec!["read".into()], -60)
+            .expect("Should issue token");
+    assert!(
+        crypto_identity::verify_token_signature(&token),
+        "precondition: the signature itself is intact"
+    );
+    assert!(!crypto_identity::token_grants(&token, "read"));
+}
+
+/// `*` still grants everything — it is why issuing is admin-only.
+#[test]
+fn test_nhi_capability_token_wildcard_grants_all() {
+    crypto_identity::register_identity("test-nhi-wildcard", None, vec![]);
+    let token =
+        crypto_identity::issue_capability_token("test-nhi-wildcard", vec!["*".into()], 3600)
+            .expect("Should issue token");
+    assert!(crypto_identity::token_grants(&token, "read:self"));
+    assert!(crypto_identity::token_grants(&token, "anything-at-all"));
 }
 
 #[test]

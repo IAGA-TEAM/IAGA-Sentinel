@@ -1,6 +1,6 @@
 """IAGA Sentinel SDK - zero-trust governance for autonomous AI agents."""
 
-from .client import SentinelClient, AsyncSentinelClient
+from .client import SentinelClient, AsyncSentinelClient, SentinelApiError
 from .decorator import governed
 from .types import (
     ActionDetail,
@@ -14,9 +14,10 @@ from .types import (
     ReviewStatus,
 )
 
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 __all__ = [
     "SentinelClient",
+    "SentinelApiError",
     "AsyncSentinelClient",
     "InspectRequest",
     "ActionDetail",

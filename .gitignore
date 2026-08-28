@@ -135,3 +135,11 @@ sentinel-skill/
 # the public docs are English. Same posture as /AUDIT.md.
 docs/demo/PROMPT_*.md
 /.audit/
+
+# Characterization harness for release audits (baseline capture/compare plus two
+# probes). Process equipment, not product: it writes into /.audit/, which is
+# already ignored above, and its captured corpus is only meaningful next to a
+# second build of the same tree -- a committed one goes stale silently and then
+# lies. That is not hypothetical: the 2.1.0 audit found a stale golden reporting
+# 4615 differences that were all artefacts. Same posture as /AUDIT.md.
+scripts/audit/

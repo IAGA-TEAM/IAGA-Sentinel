@@ -22,7 +22,7 @@ use iaga_sentinel::storage::postgres::PostgresStorage;
 use iaga_sentinel::storage::sqlite::SqliteStorage;
 use iaga_sentinel::storage::traits::{
     ApiKeyStore, AuditStore, FingerprintStore, NhiStore, PolicyStore, RateLimitStore, ReviewStore,
-    SessionStore, StorageBackend, TaintStore, TenantStore,
+    SessionStore, StorageBackend, TaintStore,
 };
 
 struct StorageBundle {
@@ -30,7 +30,6 @@ struct StorageBundle {
     review_store: Arc<dyn ReviewStore>,
     policy_store: Arc<dyn PolicyStore>,
     api_key_store: Arc<dyn ApiKeyStore>,
-    tenant_store: Arc<dyn TenantStore>,
     // v0.4.0, Durable State stores
     nhi_store: Arc<dyn NhiStore>,
     session_store: Arc<dyn SessionStore>,
@@ -64,7 +63,6 @@ async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
                     review_store: storage.clone(),
                     policy_store: storage.clone(),
                     api_key_store: storage.clone(),
-                    tenant_store: storage.clone(),
                     nhi_store: storage.clone(),
                     session_store: storage.clone(),
                     taint_store: storage.clone(),
@@ -93,7 +91,6 @@ async fn init_storage_bundle(db_url: &str) -> Result<StorageBundle, String> {
                     review_store: storage.clone(),
                     policy_store: storage.clone(),
                     api_key_store: storage.clone(),
-                    tenant_store: storage.clone(),
                     nhi_store: storage.clone(),
                     session_store: storage.clone(),
                     taint_store: storage.clone(),
@@ -145,6 +142,15 @@ enum Commands {
     /// Inspect a single payload through the governance pipeline
     Inspect {
         /// Path to JSON payload file, or --stdin
+        // `allow_hyphen_values` so the documented `--stdin` spelling actually
+        // parses. The value is a positional, so clap read the leading `--` as
+        // a flag and refused with `unexpected argument '--stdin'` and exit 2 —
+        // the same code the convention reserves for a Block. Both the help text
+        // and AGENTS.md promised the form, and `main.rs` already had the branch
+        // that handles it; only the parser disagreed. Plain `//`, not `///`:
+        // clap renders a doc comment verbatim into `--help`, so as rustdoc this
+        // shipped a fix rationale to operators as the argument's documentation.
+        #[arg(allow_hyphen_values = true)]
         source: String,
     },
 
@@ -187,6 +193,10 @@ enum Commands {
         /// (governance surface only — cannot manage keys/webhooks/config)
         #[arg(long, default_value = "admin", value_parser = ["admin", "agent"])]
         scope: String,
+
+        /// Agent identity this key may assert. Required with `--scope agent`.
+        #[arg(long)]
+        agent_id: Option<String>,
     },
 
     /// Show audit trail
@@ -631,8 +641,12 @@ async fn main() {
         Some(Commands::Export { output }) => {
             cmd_export(&db_url, output.as_deref()).await;
         }
-        Some(Commands::GenKey { label, scope }) => {
-            cmd_gen_key(&db_url, &label, &scope).await;
+        Some(Commands::GenKey {
+            label,
+            scope,
+            agent_id,
+        }) => {
+            cmd_gen_key(&db_url, &label, &scope, agent_id.as_deref()).await;
         }
         Some(Commands::Audit { limit, format }) => {
             cmd_audit(&db_url, limit, &format).await;
@@ -860,6 +874,29 @@ fn load_dictum_overlay(
     }
 }
 
+/// Whether binding to `host` keeps the server on the loopback interface.
+///
+/// The open-mode warning used to compare the string against `"127.0.0.1"` and
+/// `"::1"`, which got IPv6 exactly backwards: the address is composed with
+/// `format!("{host}:{port}")`, so the exempted `::1` renders `::1:4010`, which
+/// is not a parseable `SocketAddr` and cannot bind at all -- while `[::1]`,
+/// the form that does bind, was not exempt and drew the warning. `localhost`
+/// was warned about too. A security warning that cries wolf on loopback is a
+/// warning operators learn to ignore.
+///
+/// ponytail: strip the brackets and let `IpAddr::is_loopback` decide, which
+/// also picks up the rest of `127.0.0.0/8` for free.
+fn is_loopback_host(host: &str) -> bool {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    bare.eq_ignore_ascii_case("localhost")
+        || bare
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 async fn cmd_serve(
     db_url: &str,
     port_override: Option<u16>,
@@ -1032,6 +1069,28 @@ async fn cmd_serve(
                 iaga_sentinel::modules::session_graph::session_dag::prune_stale_sessions(ttl_ms);
             let challenge_pruned =
                 iaga_sentinel::modules::nhi::crypto_identity::prune_expired_challenges();
+            // The sandbox approval queue was the one process-global this task
+            // never touched: it shrank only when an admin approved or rejected,
+            // so unclaimed entries accumulated for the life of the process. Its
+            // own TTL, not the shared `ttl`: an approval request is work waiting
+            // on a human and deserves longer than a taint label.
+            let sandbox_pruned =
+                iaga_sentinel::modules::sandbox::sandbox_executor::prune_stale_pending(
+                    iaga_sentinel::modules::sandbox::sandbox_executor::pending_ttl_ms(),
+                );
+            // Capability tokens carry their own expiry and are now durable, so
+            // expired rows have to be swept like challenges are. Revoked ones
+            // are kept until they expire: the row is what makes the revocation
+            // fleet-wide, and deleting it early would let the id be presented
+            // again as merely "unknown".
+            let capability_tokens_pruned = match cleanup_nhi.prune_expired_capability_tokens().await
+            {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to prune expired capability tokens");
+                    0
+                }
+            };
 
             // The rate limiter prunes each key's timestamps when that key is
             // used, but nothing ever removed the KEYS: `windows` gained one
@@ -1070,6 +1129,8 @@ async fn cmd_serve(
                     agent_taint_pruned,
                     session_pruned,
                     challenge_pruned,
+                    sandbox_pruned,
+                    capability_tokens_pruned,
                     "TTL cleanup completed"
                 );
             }
@@ -1103,7 +1164,6 @@ async fn cmd_serve(
         review_store: storage.review_store,
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
-        tenant_store: storage.tenant_store,
         nhi_store: storage.nhi_store,
         session_store: storage.session_store,
         taint_store: storage.taint_store,
@@ -1135,7 +1195,36 @@ async fn cmd_serve(
         }
     };
 
-    tracing::info!(port = state.env.port, db = %db_url, backend = ?state.storage_backend, "IAGA Sentinel listening");
+    tracing::info!(
+        host = %state.env.host,
+        port = state.env.port,
+        db = %redact_db_url(db_url),
+        backend = ?state.storage_backend,
+        "IAGA Sentinel listening"
+    );
+
+    // The one combination an operator must not reach by accident.
+    //
+    // The default bind is `0.0.0.0` (config/env.rs) and open mode grants every
+    // request implicit ADMIN scope (auth/middleware.rs). Together that is an
+    // unauthenticated admin API on every interface. The README says so in prose;
+    // the binary said nothing at all -- the startup line logged port, db and
+    // backend and was silent about both halves, so the one place an operator is
+    // certainly looking never mentioned it.
+    //
+    // A warning rather than a refusal: `--seed-demo` on 0.0.0.0 in open mode is
+    // a legitimate way to run the demo inside a container, and CI does exactly
+    // that. Making it fatal would break a documented workflow to prevent a
+    // mistake that a loud line prevents just as well.
+    if iaga_sentinel::auth::middleware::is_open_mode_enabled() && !is_loopback_host(&state.env.host)
+    {
+        tracing::warn!(
+            host = %state.env.host,
+            "IAGA_SENTINEL_OPEN_MODE is enabled AND the server is bound to a non-loopback \
+             address: every request on every interface is treated as ADMIN, with no API key. \
+             Bind to 127.0.0.1 (IAGA_SENTINEL_HOST) or disable open mode and run `iaga gen-key`."
+        );
+    }
 
     if let Err(e) = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -1146,6 +1235,37 @@ async fn cmd_serve(
     }
 
     tracing::info!("IAGA Sentinel shut down gracefully");
+}
+
+/// Strip the password out of a connection string before it reaches a log line.
+///
+/// The boot banner logged `DATABASE_URL` verbatim, so a Postgres deployment
+/// wrote its database password to stdout on every start — and under the Helm
+/// chart that URL comes from a Secret and lands in the pod log. The product's
+/// own scanner classifies the resulting line as a `connection_string` leak and
+/// blocks it, which is the sharpest possible statement of the problem.
+/// `DATA_HANDLING.md` lists connection strings among the sensitive values and
+/// takes the trouble to say the bootstrap key is never logged; this makes that
+/// section true of the database URL too.
+///
+/// ponytail: string surgery, not a URL parser. The only shape that carries a
+/// secret here is `scheme://user:password@host/...`, and a value that does not
+/// match is passed through unchanged rather than mangled.
+fn redact_db_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    // Authority ends at the first `/`, `?` or `#`; an `@` after that is not a
+    // credential separator (a path or query may legitimately contain one).
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((creds, host)) => match creds.split_once(':') {
+            Some((user, _password)) => format!("{scheme}://{user}:***@{host}{tail}"),
+            None => format!("{scheme}://{creds}@{host}{tail}"),
+        },
+        None => url.to_string(),
+    }
 }
 
 async fn shutdown_signal() {
@@ -1222,7 +1342,6 @@ async fn cmd_inspect(source: &str, db_url: &str) -> i32 {
         review_store: storage.review_store,
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
-        tenant_store: storage.tenant_store,
         nhi_store: storage.nhi_store,
         session_store: storage.session_store,
         taint_store: storage.taint_store,
@@ -1372,12 +1491,37 @@ fn cmd_validate(config_path: &str) {
 
     match result {
         Ok(config) => {
-            println!("Config is valid!");
             println!("  {} agent profiles", config.profiles.len());
             println!("  {} workspace policies", config.workspaces.len());
             let total_tools: usize = config.workspaces.iter().map(|w| w.tools.len()).sum();
             println!("  {} tool policies", total_tools);
-            print_policy_lint(&config.workspaces);
+
+            // The headline goes AFTER the lints, and says what is true.
+            //
+            // It used to be the first line printed, so `Config is valid!` sat
+            // several lines above `error [critical] contradiction` — a human
+            // read the verdict before the evidence that contradicted it, and a
+            // CI gate reading the exit code accepted a policy that does not
+            // mean one thing. `iaga import` then imported it, also with exit 0.
+            //
+            // `critical` is the level `formal_verify` reserves for exactly that:
+            // two entries for one tool with conflicting `maxDecision`, where no
+            // single verdict can be said to be the policy's. `high`/`medium`
+            // stay advisory and keep exit 0 — a policy that has not adopted
+            // `destinationFields` is legal, and failing it would break every
+            // existing config.
+            let critical = print_policy_lint(&config.workspaces);
+            println!();
+            if critical == 0 {
+                println!("Config is valid!");
+            } else {
+                println!(
+                    "Config parsed, but {critical} critical issue{} must be resolved: the policy \
+                     has no single meaning as written.",
+                    if critical == 1 { "" } else { "s" }
+                );
+                process::exit(1);
+            }
         }
         Err(e) => {
             eprintln!("Invalid config: {e}");
@@ -1397,21 +1541,35 @@ fn cmd_validate(config_path: &str) {
 /// tool declares no `destinationFields` (its domain allowlist is then applied
 /// by a fixed four-name probe and skipped entirely for any other key).
 ///
-/// Advisory on purpose: these are lints, not schema errors, so the exit code
-/// does not change — a policy that has not adopted `destinationFields` is still
-/// a legal policy and failing it here would break every existing config.
+/// Advisory for `high` and below: those are lints, not schema errors, so the
+/// exit code does not change — a policy that has not adopted `destinationFields`
+/// is still a legal policy and failing it would break every existing config.
 ///
-/// `critical` issues are labelled `error` rather than `warning` even so.
-/// `formal_verify` reserves that level for contradictions — two entries for
-/// one tool with conflicting `maxDecision`, where the policy does not mean one
-/// thing — and printing that as a `warning` under a "Config is valid!"
-/// headline reads as advisory when it is not. `high` stays a warning: it
+/// `critical` is not advisory. `formal_verify` reserves that level for
+/// contradictions — two entries for one tool with conflicting `maxDecision`,
+/// where the policy does not mean one thing — so it is labelled `error`, it is
+/// counted, and the caller fails the command on it. `high` stays a warning: it
 /// covers deliberate postures such as deny-all egress.
-fn print_policy_lint(workspaces: &[iaga_sentinel::core::types::WorkspacePolicy]) {
+///
+/// Returns the number of `critical` issues found.
+fn print_policy_lint(workspaces: &[iaga_sentinel::core::types::WorkspacePolicy]) -> usize {
     use iaga_sentinel::modules::policy::formal_verify;
 
+    let mut critical = 0usize;
     for ws in workspaces {
+        // `verify_policy` reports one issue per offending ENTRY, so a tool
+        // declared twice yields the same contradiction twice. Deduplicate on
+        // the rendered text: repeating it does not tell the operator anything
+        // the first line did not, and it inflates the count they are asked to
+        // resolve.
+        let mut seen = std::collections::HashSet::new();
         for issue in formal_verify::verify_policy(ws).issues {
+            if !seen.insert((issue.severity.clone(), issue.description.clone())) {
+                continue;
+            }
+            if issue.severity == "critical" {
+                critical += 1;
+            }
             // `critical` only. `high` covers postures that are legal and often
             // deliberate — "HTTP tools but no allowedDomains" is deny-all egress,
             // which is a safe configuration, not an error.
@@ -1432,6 +1590,7 @@ fn print_policy_lint(workspaces: &[iaga_sentinel::core::types::WorkspacePolicy])
             println!("  fix: {}", issue.suggestion);
         }
     }
+    critical
 }
 
 // ── plugins ──
@@ -1946,7 +2105,22 @@ async fn cmd_import(config_path: &str, db_url: &str) {
     // The same lint `validate` prints. `import` is the other half of the
     // pre-flight — it is what actually installs the policy — and an operator
     // who goes straight to it would otherwise never see the warning.
-    print_policy_lint(&config.workspaces);
+    //
+    // And it refuses on the same condition. `import` is the more dangerous of
+    // the two: `validate` only reports, while this writes the policy into the
+    // store that governs every subsequent action. A contradiction installed here
+    // means the running product enforces a policy that has no single meaning,
+    // and it did so with exit 0.
+    let critical = print_policy_lint(&config.workspaces);
+    if critical > 0 {
+        eprintln!();
+        eprintln!(
+            "refusing to import: {critical} critical issue{} — the policy has no single meaning \
+             as written, and importing it would install that ambiguity into the governing store.",
+            if critical == 1 { "" } else { "s" }
+        );
+        process::exit(1);
+    }
 
     let storage = init_storage_bundle(db_url).await.unwrap_or_else(|e| {
         eprintln!("{e}");
@@ -2023,7 +2197,7 @@ async fn cmd_export(db_url: &str, output: Option<&str>) {
 
 // ── gen-key ──
 
-async fn cmd_gen_key(db_url: &str, label: &str, scope: &str) {
+async fn cmd_gen_key(db_url: &str, label: &str, scope: &str, agent_id: Option<&str>) {
     use iaga_sentinel::auth::api_keys::generate_api_key;
     use iaga_sentinel::storage::traits::KeyScope;
 
@@ -2035,12 +2209,28 @@ async fn cmd_gen_key(db_url: &str, label: &str, scope: &str) {
     // Clap's value_parser restricts to admin|agent; from_db maps anything
     // else to Admin defensively.
     let key_scope = KeyScope::from_db(scope);
+    let agent_id = match key_scope {
+        KeyScope::Agent => Some(
+            agent_id
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| {
+                    eprintln!("--agent-id is required with --scope agent");
+                    process::exit(2);
+                }),
+        ),
+        KeyScope::Admin if agent_id.is_some() => {
+            eprintln!("--agent-id is only valid with --scope agent");
+            process::exit(2);
+        }
+        KeyScope::Admin => None,
+    };
     let (raw_key, key_hash) = generate_api_key();
     let key_id = uuid::Uuid::new_v4().to_string();
 
     storage
         .api_key_store
-        .store_key_scoped(&key_id, &key_hash, label, &raw_key, key_scope)
+        .store_key_scoped(&key_id, &key_hash, label, &raw_key, key_scope, agent_id)
         .await
         .unwrap_or_else(|e| {
             eprintln!("Failed to store key: {e}");
@@ -2052,6 +2242,9 @@ async fn cmd_gen_key(db_url: &str, label: &str, scope: &str) {
     println!("  Key:   {raw_key}");
     println!("  Label: {label}");
     println!("  Scope: {}", key_scope.as_str());
+    if let Some(agent_id) = agent_id {
+        println!("  Agent: {agent_id}");
+    }
     println!();
     println!("Save this key now, it cannot be retrieved again.");
 }
@@ -2066,45 +2259,57 @@ async fn cmd_cost(db_url: &str, view: &str, from: Option<&str>, to: Option<&str>
     });
     let store = &storage.audit_store;
 
-    let value: serde_json::Value = match view {
-        "summary" => {
-            let s = store.cost_summary(from, to).await.unwrap_or_else(|e| {
-                eprintln!("cost_summary failed: {e}");
-                process::exit(1);
-            });
-            serde_json::to_value(s).unwrap_or_default()
-        }
-        "by-model" => serde_json::to_value(
-            store
-                .cost_by_model(from, to, limit)
-                .await
-                .unwrap_or_default(),
-        )
-        .unwrap_or_default(),
-        "by-agent" => serde_json::to_value(
-            store
-                .cost_by_agent(from, to, limit)
-                .await
-                .unwrap_or_default(),
-        )
-        .unwrap_or_default(),
-        "by-tool" => serde_json::to_value(
-            store
-                .cost_by_tool(from, to, limit)
-                .await
-                .unwrap_or_default(),
-        )
-        .unwrap_or_default(),
-        "budget" => serde_json::json!({
-            "sessionLimitUsd": iaga_sentinel::pipeline::cost::session_budget_usd(),
-        }),
-        other => {
-            eprintln!(
+    let value: serde_json::Value =
+        match view {
+            "summary" => {
+                let s = store.cost_summary(from, to).await.unwrap_or_else(|e| {
+                    eprintln!("cost_summary failed: {e}");
+                    process::exit(1);
+                });
+                serde_json::to_value(s).unwrap_or_default()
+            }
+            // `unwrap_or_default()` here used to render a rejected `--from` as `[]`
+            // with exit 0 — byte-identical to the legitimate "no spend in that
+            // window". `summary` above already exits 1 with the store's message;
+            // these three now do the same, so a typo in a date bound cannot read as
+            // an answer.
+            "by-model" => {
+                serde_json::to_value(store.cost_by_model(from, to, limit).await.unwrap_or_else(
+                    |e| {
+                        eprintln!("cost_by_model failed: {e}");
+                        process::exit(1);
+                    },
+                ))
+                .unwrap_or_default()
+            }
+            "by-agent" => {
+                serde_json::to_value(store.cost_by_agent(from, to, limit).await.unwrap_or_else(
+                    |e| {
+                        eprintln!("cost_by_agent failed: {e}");
+                        process::exit(1);
+                    },
+                ))
+                .unwrap_or_default()
+            }
+            "by-tool" => {
+                serde_json::to_value(store.cost_by_tool(from, to, limit).await.unwrap_or_else(
+                    |e| {
+                        eprintln!("cost_by_tool failed: {e}");
+                        process::exit(1);
+                    },
+                ))
+                .unwrap_or_default()
+            }
+            "budget" => serde_json::json!({
+                "sessionLimitUsd": iaga_sentinel::pipeline::cost::session_budget_usd(),
+            }),
+            other => {
+                eprintln!(
                 "unknown view '{other}' (use: summary | by-model | by-agent | by-tool | budget)"
             );
-            process::exit(2);
-        }
-    };
+                process::exit(2);
+            }
+        };
 
     println!(
         "{}",
@@ -2261,7 +2466,7 @@ async fn bootstrap_api_key_from_env(store: &Arc<dyn iaga_sentinel::storage::trai
     let key_id = uuid::Uuid::new_v4().to_string();
     let key_hash = hash_key(&raw);
     match store
-        .store_key_scoped(&key_id, &key_hash, "bootstrap", &raw, KeyScope::Admin)
+        .store_key_scoped(&key_id, &key_hash, "bootstrap", &raw, KeyScope::Admin, None)
         .await
     {
         // The key itself is never logged: it is a live admin credential.
@@ -2351,7 +2556,6 @@ async fn cmd_proxy(
         review_store: storage.review_store,
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
-        tenant_store: storage.tenant_store,
         nhi_store: storage.nhi_store,
         session_store: storage.session_store,
         taint_store: storage.taint_store,
@@ -2426,7 +2630,6 @@ async fn cmd_mcp_server(
         review_store: storage.review_store,
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
-        tenant_store: storage.tenant_store,
         nhi_store: storage.nhi_store,
         session_store: storage.session_store,
         taint_store: storage.taint_store,
@@ -2489,7 +2692,6 @@ async fn cmd_mcp_doctor(
         review_store: storage.review_store,
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
-        tenant_store: storage.tenant_store,
         nhi_store: storage.nhi_store,
         session_store: storage.session_store,
         taint_store: storage.taint_store,
@@ -2610,7 +2812,7 @@ fn cmd_policy_test(path: &str, context_path: Option<&str>) -> i32 {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("iaga policy test: cannot read {}: {}", path, e);
+            eprintln!("iaga policy: cannot read {}: {}", path, e);
             return 2;
         }
     };
@@ -2641,7 +2843,7 @@ fn cmd_policy_test(path: &str, context_path: Option<&str>) -> i32 {
     let ctx_raw = match std::fs::read_to_string(ctx_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("iaga policy test: cannot read context {}: {}", ctx_path, e);
+            eprintln!("iaga policy: cannot read context {}: {}", ctx_path, e);
             return 2;
         }
     };
@@ -2793,7 +2995,6 @@ async fn cmd_kernel_run(
         review_store: storage.review_store,
         policy_store: storage.policy_store,
         api_key_store: storage.api_key_store,
-        tenant_store: storage.tenant_store,
         nhi_store: storage.nhi_store,
         session_store: storage.session_store,
         taint_store: storage.taint_store,
@@ -3173,4 +3374,79 @@ re-executable evidence is the union of stored verdict/reasons only."
         );
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_loopback_host, redact_db_url};
+
+    #[test]
+    fn loopback_hosts_do_not_draw_the_open_mode_warning() {
+        // The two forms that actually bind to IPv6 loopback and the plain name.
+        // `[::1]` is the one the old string compare warned about while exempting
+        // `::1`, which cannot bind at all.
+        for host in [
+            "127.0.0.1",
+            "127.0.0.53",
+            "::1",
+            "[::1]",
+            "localhost",
+            "LOCALHOST",
+        ] {
+            assert!(is_loopback_host(host), "{host} is loopback");
+        }
+    }
+
+    #[test]
+    fn routable_hosts_still_draw_it() {
+        for host in [
+            "0.0.0.0",
+            "::",
+            "10.0.0.7",
+            "192.168.1.4",
+            "example.com",
+            "",
+        ] {
+            assert!(!is_loopback_host(host), "{host} is not loopback");
+        }
+    }
+
+    #[test]
+    fn the_boot_log_never_carries_a_database_password() {
+        // The banner logged DATABASE_URL verbatim, so a Postgres deployment
+        // wrote its password to stdout on every start — and under the Helm
+        // chart that URL comes from a Secret and lands in the pod log. Asserted
+        // rather than eyeballed because the leak is invisible on the SQLite
+        // default, which is what a developer runs.
+        for (raw, expected) in [
+            (
+                "postgres://sentinel:hunter2@db.internal:5432/iaga",
+                "postgres://sentinel:***@db.internal:5432/iaga",
+            ),
+            // Query strings are common on managed Postgres and must survive.
+            (
+                "postgres://u:p@host/db?sslmode=require",
+                "postgres://u:***@host/db?sslmode=require",
+            ),
+            // A userinfo with no password is not a secret; leave it readable.
+            ("postgres://sentinel@host/db", "postgres://sentinel@host/db"),
+        ] {
+            assert_eq!(redact_db_url(raw), expected, "for {raw}");
+            assert!(
+                !redact_db_url(raw).contains("hunter2"),
+                "password survived redaction for {raw}"
+            );
+        }
+
+        // Shapes that carry no credential must come back untouched, not mangled.
+        for pass_through in [
+            "sqlite:iaga_sentinel.db?mode=rwc",
+            "sqlite::memory:",
+            "not-a-url",
+            // An `@` in the path is not a credential separator.
+            "postgres://host/db@weird",
+        ] {
+            assert_eq!(redact_db_url(pass_through), pass_through);
+        }
+    }
 }

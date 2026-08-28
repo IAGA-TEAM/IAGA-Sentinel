@@ -68,24 +68,6 @@ impl TractEngine {
         Ok(Self { models })
     }
 
-    /// Build directly from an in-memory `(name, RunnableModel, digest_seed)`
-    /// triple. Exposed for tests that don't want to write a real ONNX
-    /// file to disk; production callers use `from_paths`.
-    pub fn from_runnables(runnables: Vec<(String, RunnableModel, Vec<u8>)>) -> Self {
-        let models = runnables
-            .into_iter()
-            .map(|(name, runner, digest_seed)| LoadedModel {
-                digest: ModelDigest {
-                    name: name.clone(),
-                    sha256: sha256_hex(&digest_seed),
-                },
-                name,
-                runner,
-            })
-            .collect();
-        Self { models }
-    }
-
     /// Number of currently loaded models. Used by `iaga reasoning info`.
     pub fn model_count(&self) -> usize {
         self.models.len()

@@ -73,9 +73,17 @@ plugin-manifest-signing = ["receipts", "dep:ed25519-dalek", "dep:base64"]
 # Default ON (since 1.8): operators expect cost + model visibility out of the
 # box. Receipts stay byte-identical when a caller reports no `usage` (the field
 # is `skip_serializing_if = None`), so determinism/golden vectors are unaffected;
-# usage is only embedded when the caller actually supplies it. iaga-sentinel-cost
-# is a non-optional leaf dependency. Disable with `--no-default-features` for a
-# build byte-identical to the pre-1.5 wire.
+# usage is only embedded when the caller actually supplies it.
+#
+# There is NO supported way to build without it. `--no-default-features` was
+# documented here as the off switch and is not one, twice over: `default` also
+# carries sqlite, receipts, dictum, reasoning and kernel, so that build has no
+# storage and no receipts — it is not "the pre-1.5 wire", it is not a product;
+# and `iaga-sentinel-cost` is a NON-optional dependency with `cost-control = []`
+# an empty marker feature, so the crate stays linked regardless. The 27
+# `#[cfg(feature = "cost-control")]` sites gate the behaviour, not the
+# dependency. Nothing in CI builds `--no-default-features`, which is why an
+# untrue recipe sat here unnoticed.
 cost-control = []
 
 [dependencies]

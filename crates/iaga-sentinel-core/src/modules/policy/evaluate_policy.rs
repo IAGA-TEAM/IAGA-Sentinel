@@ -56,14 +56,35 @@ pub fn evaluate_policy(
                 minimum_decision = GovernanceDecision::Review;
             }
 
-            if tp.max_decision == GovernanceDecision::Review
-                && minimum_decision == GovernanceDecision::Allow
-            {
-                findings.push(format!(
-                    "tool {} is capped at review in workspace policy",
-                    input.action.tool_name
-                ));
-                minimum_decision = GovernanceDecision::Review;
+            // `max_decision` is implemented as a FLOOR, not a ceiling: the arm
+            // below RAISES Allow to Review. `Block` had no arm at all, so a tool
+            // pinned to `maxDecision: block` was governed exactly as if it had
+            // said `allow` and the verdict fell through to the risk score alone.
+            //
+            // Meanwhile `formal_verify` reads the same field the other way:
+            // :151 calls an all-Block tool's `allowedActionTypes` "meaningless"
+            // and :257 reports an all-Block policy as a CRITICAL deny-all, which
+            // `iaga validate` prints as an error (main.rs:1418). So a policy that
+            // permitted everything was being reported to the operator as one that
+            // denied everything. `types.rs:225` makes Block the Default and calls
+            // it "the safe end of the scale", which is only true if Block denies.
+            //
+            // `GovernanceDecision` is Ord (Allow < Review < Block), so one
+            // monotone merge covers both arms and can never soften a stricter
+            // decision an earlier arm already reached.
+            if tp.max_decision > minimum_decision {
+                findings.push(if tp.max_decision == GovernanceDecision::Block {
+                    format!(
+                        "tool {} is pinned to block in workspace policy",
+                        input.action.tool_name
+                    )
+                } else {
+                    format!(
+                        "tool {} is capped at review in workspace policy",
+                        input.action.tool_name
+                    )
+                });
+                minimum_decision = tp.max_decision;
             }
         }
     }
@@ -397,7 +418,7 @@ fn host_is_allowed(host: &str, workspace_policy: &WorkspacePolicy) -> bool {
 /// path/query/fragment; preserves a bracketed IPv6 literal. A bare host is
 /// returned unchanged (lowercased), so existing bare-host allowlists keep
 /// working; unparseable input yields "" (matches no allowlist entry).
-fn host_of(s: &str) -> String {
+pub(crate) fn host_of(s: &str) -> String {
     let after_scheme = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
     let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
     let hostport = authority

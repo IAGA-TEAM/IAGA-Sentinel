@@ -676,7 +676,34 @@ pub async fn execute_pipeline_at(
             minimum_decision = GovernanceDecision::Review;
         }
         for attack in &session_result.attacks_detected {
-            policy_findings.push(format!("session graph attack: {}", attack.name));
+            // Name the actors when the chain is not this caller's alone.
+            //
+            // The session DAG is keyed on the client-declared `metadata.sessionId`
+            // and both SDK quick starts hardcode the same one, so two agents
+            // sharing a session is the copy-paste default. A chain matched
+            // across that shared graph can be made entirely of someone else's
+            // calls — and this string is signed into the CALLER's receipt, so
+            // an unqualified "session graph attack: data_exfiltration" made an
+            // innocent agent's evidence assert that it had exfiltrated data.
+            //
+            // Silent in the ordinary single-agent case: `agents` is exactly
+            // `[caller]` and adds nothing worth a line in the queue a human
+            // reads.
+            let others: Vec<&str> = attack
+                .agents
+                .iter()
+                .map(String::as_str)
+                .filter(|a| *a != input.agent_id)
+                .collect();
+            if others.is_empty() {
+                policy_findings.push(format!("session graph attack: {}", attack.name));
+            } else {
+                policy_findings.push(format!(
+                    "session graph attack: {} (chain formed in this session by: {})",
+                    attack.name,
+                    others.join(", ")
+                ));
+            }
         }
         for reason in &session_result.anomaly_reasons {
             policy_findings.push(format!("session graph: {}", reason));
@@ -1141,7 +1168,19 @@ pub async fn execute_pipeline_at(
         review_reasons.extend(result.risk.reasons.clone());
 
         let review = ReviewRequest {
-            id: Uuid::new_v4().to_string(),
+            // The review IS the audit event it was raised for, so it carries
+            // that event's id rather than a second, unrelated UUID. Nothing
+            // linked the two before — `review_requests` has no `event_id`
+            // column — so an exported audit log could not say which action a
+            // given adjudication belonged to. The only join left was
+            // (agent_id, tool_name, created_at == audit.timestamp), which holds
+            // only because both are stamped from `decision_ts`, and is unique
+            // only by luck.
+            //
+            // Safe as a primary key: `event_id` is a fresh v4 UUID and this is
+            // the only `ReviewRequest` constructed in the crate, so at most one
+            // request is ever opened per verdict.
+            id: result.audit_event.event_id.clone(),
             agent_id: result.profile.agent_id.clone(),
             workspace_id: result.profile.workspace_id.clone(),
             tool_name: result.audit_event.tool_name.clone(),
@@ -1154,6 +1193,22 @@ pub async fn execute_pipeline_at(
         };
 
         state.review_store.create(&review).await?;
+
+        // Publish it. `review_created` is in the SSE event enum, in the webhook
+        // dispatcher, in the `docs/openapi.yaml` event list, in FEATURES.md and
+        // in the console's Live feed — and nothing ever constructed the variant,
+        // so the one event that says "a human is needed" was the only one that
+        // never fired. An operator watching the stream saw the action governed
+        // and then silence; the queue filled with nobody told.
+        state
+            .event_bus
+            .publish(crate::events::bus::SentinelEvent::ReviewCreated {
+                review_id: review.id.clone(),
+                agent_id: review.agent_id.clone(),
+                tool_name: review.tool_name.clone(),
+                risk_score: review.risk_score,
+            });
+
         result.review_request_id = Some(review.id);
         result.review_status = ReviewStatus::Pending;
     }
@@ -1244,7 +1299,21 @@ const SENSITIVE_PATTERNS: &[SensitivePatternDef] = &[
         name: "private_key_block",
         description: "PEM private key block",
         category: "credential",
-        regex: r"-----BEGIN\s+(RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE KEY-----",
+        // The WHOLE block, not just the BEGIN line. This table drives the
+        // redaction as well as the finding, so a pattern that matches less than
+        // the secret publishes the remainder in `redactedPayload` -- the one
+        // field a caller is entitled to treat as safe. Measured before the fix:
+        // a PEM came back as the marker, then the entire key body, then the
+        // END line -- correctly found, correctly blocked, and fully disclosed.
+        // The marker made it look handled, which is worse than an obvious miss.
+        //
+        // `(?s)` so `.` crosses the newlines a PEM is made of, and `.*?` so two
+        // keys in one payload are two matches rather than one greedy swallow of
+        // everything between them. The trailing `|.*` alternative is the
+        // truncated case: a BEGIN with no END would not match an anchored block
+        // pattern at all, which would have been a regression on the header-only
+        // behaviour instead of a fix.
+        regex: r"(?s)-----BEGIN\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE KEY-----(?:.*?-----END\s+(?:RSA\s+|EC\s+|DSA\s+|OPENSSH\s+)?PRIVATE KEY-----|.*)",
         redact_with: "[REDACTED-PRIVATE-KEY]",
     },
     SensitivePatternDef {
@@ -1262,6 +1331,24 @@ const SENSITIVE_PATTERNS: &[SensitivePatternDef] = &[
         redact_with: "[REDACTED-CONN-STRING]",
     },
 ];
+
+/// Whether `text` carries any credential this build knows how to recognise.
+///
+/// The single source of truth for "is this a credential", shared with the taint
+/// tracker's egress path. `/v1/response/scan` ran this table while
+/// `/v1/inspect` ran a separate lowercase substring list, so the same
+/// `AKIAIOSFODNN7EXAMPLE` was `review`/70 coming IN and `allow`/2 going OUT —
+/// the exfiltration direction was the weaker of the two, which is backwards.
+/// Nothing was missing from the product; one detector did not share the other's
+/// patterns.
+///
+/// Only the `credential` category: PII and financial patterns are a different
+/// judgement and the taint layer does not treat them as secrets.
+pub(crate) fn contains_known_credential(text: &str) -> bool {
+    COMPILED_PATTERNS
+        .iter()
+        .any(|(re, pat)| pat.category == "credential" && re.is_match(text))
+}
 
 /// Build compiled regex patterns (cached via Lazy).
 static COMPILED_PATTERNS: Lazy<Vec<(Regex, &'static SensitivePatternDef)>> = Lazy::new(|| {
@@ -1299,25 +1386,45 @@ pub fn scan_response(input: &ResponseScanRequest) -> ResponseScanResult {
     }
 
     // ── Check 2: Taint tracking (detect secret/credential leaks) ──
-    let inherited_taints = input
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get("sessionId"))
-        .and_then(|v| v.as_str())
-        .map(taint_tracker::get_session_taint)
-        .unwrap_or_default();
-
+    //
+    // Judged on THIS response's own content, with no inherited session labels.
+    // Two separate reasons, and both are needed:
+    //
+    //  * the sink. Passing `"http"` classified inbound data as NetworkEgress,
+    //    whose forbidden set includes LOCAL_FS and DB_RESULT.
+    //  * the inherited set. `get_session_taint` describes what the SESSION has
+    //    touched, not what came back in this payload, and it was folded in
+    //    before the check.
+    //
+    // Together they meant one `file_read` anywhere in a session made every later
+    // `/v1/response/scan` in that session Block at risk 80 no matter what the
+    // response said -- so "read a file, then summarise it" was broken from the
+    // second step on, and each false Block wrote a signed audit record.
+    //
+    // Fixing only the sink would have been worse than either: SECRET is
+    // forbidden at both sinks, so an inherited SECRET (a `.env` read earlier in
+    // the session) would still block every later scan. Fixing only the inherited
+    // set would have left LOCAL_FS forbidden at NetworkEgress.
+    //
+    // Nothing is lost: `scan_response` never wrote back to the session taint
+    // store, so the inherited set was read-only here, and a secret carried
+    // ONWARD is governed at `/v1/inspect` on the next action, where the sink
+    // really is egress.
     let taint_result = taint_tracker::analyze_taint(
-        "http", // response is coming back from a tool, treat as network data
+        taint_tracker::TOOL_RESPONSE_ACTION,
         &input.tool_name,
         &payload_str,
-        &inherited_taints,
+        &std::collections::HashSet::new(),
     );
     if taint_result.blocked {
         findings.push(format!("taint tracking: {}", taint_result.summary));
         if risk_score < 80 {
             risk_score = 80;
         }
+    } else if !taint_result.violations.is_empty() {
+        // Advisory: reported, but it does not move the score. Losing the signal
+        // entirely was the other way this could have been "fixed".
+        findings.push(format!("taint tracking: {}", taint_result.summary));
     }
     if taint_result.exfiltration_detected {
         findings.push("taint: potential data exfiltration in response".to_string());

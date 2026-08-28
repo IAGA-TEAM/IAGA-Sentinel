@@ -99,6 +99,24 @@ pub fn verify_export(
                 source,
             ));
         }
+        // The envelope's `run_id` is not covered by any signature, so a chain of
+        // genuinely signed receipts can be relabelled to a run that never
+        // happened and still verify. The Python and Node verifiers have always
+        // rejected that; this one did not, which broke the conformance promise
+        // that all three reach the same verdict with the same exit code. Same
+        // wording as theirs, deliberately.
+        if r.body.run_id != export.run_id {
+            return Ok((
+                ChainStatus::Broken {
+                    seq: r.body.seq,
+                    reason: format!(
+                        "run_id mismatch: expected {} got {}",
+                        export.run_id, r.body.run_id
+                    ),
+                },
+                source,
+            ));
+        }
     }
 
     let status =

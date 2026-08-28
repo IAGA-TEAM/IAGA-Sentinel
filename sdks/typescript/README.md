@@ -36,7 +36,7 @@ import { SentinelClient } from "@iaga-sentinel/sdk";
 const client = new SentinelClient({ apiKey: "ak-local" });
 
 const result = await client.inspect({
-  agentId: "builder-01",
+  agentId: "openclaw-builder-01",
   workspaceId: "ws-demo",
   framework: "openai",
   sessionId: "session-123",
@@ -50,6 +50,38 @@ const result = await client.inspect({
 console.log(result.decision, result.traceId);
 ```
 
+
+## Reading an agent's own record (2.1.0)
+
+The per-agent reads are admin-only as of 2.1.0, because any valid key could
+previously read any agent's data. An agent-scoped key reaches its **own** record
+by presenting a capability token minted by an admin:
+
+```ts
+const admin = new SentinelClient({ apiKey: "ak-admin" });
+const created = await admin.createKey("builder", "agent", "openclaw-builder-01");
+const token = await admin.issueToken({
+  agentId: "openclaw-builder-01",
+  capabilities: ["read:self"],
+});
+
+const agent = new SentinelClient({
+  apiKey: created.key as string,
+  capabilityToken: token.tokenId as string,
+});
+await agent.getProfile("openclaw-builder-01");   // 200
+await agent.getProfile("someone-else"); // 403 agent_scope_mismatch
+```
+
+The API key and token are both bound to the same `agentId`; neither can widen
+into another agent's data, whatever capabilities the token carries. Agent keys
+created before 2.1.0 have no binding and fail closed until rotated. The token
+covers `/v1/profiles/{id}`,
+`/v1/analytics/agents/{id}`, `/v1/fingerprint/{id}` and
+`/v1/rate-limit/status/{id}`. `admin.listTokens()` shows what is outstanding
+(signatures withheld) and `admin.revokeToken(tokenId)` withdraws one; revocation
+is durable and fleet-wide.
+
 ## Adapters
 
 ```ts
@@ -57,12 +89,12 @@ import OpenAI from "openai";
 import { sentinelMiddleware, sentinelWrapOpenAI } from "@iaga-sentinel/sdk";
 
 const openai = sentinelWrapOpenAI(new OpenAI(), {
-  agentId: "builder-01",
+  agentId: "openclaw-builder-01",
   apiKey: "ak-local",
 });
 
 const middleware = sentinelMiddleware({
-  agentId: "builder-01",
+  agentId: "openclaw-builder-01",
   apiKey: "ak-local",
   toolName: "vercel-ai.generate",
 });
@@ -94,7 +126,7 @@ Both adapters take an `actionType` that skips the guess:
 import { governedToolNode } from "@iaga-sentinel/sdk";
 
 const node = governedToolNode(tools, {
-  agentId: "builder-01",
+  agentId: "openclaw-builder-01",
   actionType: "file_read", // `search_docs` is a read, not `custom`
 });
 ```

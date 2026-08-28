@@ -6,7 +6,13 @@ export function makeFetch(routes) {
   const calls = [];
   const fetchImpl = async (url, init) => {
     const body = init?.body ? JSON.parse(init.body) : undefined;
-    calls.push({ url: String(url), method: init?.method, headers: init?.headers, body });
+    calls.push({
+      url: String(url),
+      method: init?.method,
+      headers: init?.headers,
+      body,
+      redirect: init?.redirect,
+    });
     const key = Object.keys(routes).find((k) => String(url).endsWith(k));
     const route = key ? routes[key] : undefined;
     if (!route || route.throws) throw new Error("ECONNREFUSED (stub)");

@@ -23,15 +23,15 @@ target/
 .github/
 
 # Local state that must never reach an image layer
-*.db
-*.db-shm
-*.db-wal
-*.db-journal
-chain.json
-.env
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.db-journal
+**/chain.json
+**/.env
 **/.local/
 **/.live/
-keys/
+**/keys/
 
 # Trees the build never reads
 docs/

@@ -192,8 +192,16 @@ pub struct ToolPolicy {
 /// purpose: once a tool declares its fields the extraction is fail-closed, so a
 /// name that is merely *unusual* — `uri`, `target`, `webhook` — should be
 /// host-checked against the allowlist rather than turned into a refusal. The
-/// names NOT listed here are the point: they now block instead of slipping
-/// through.
+/// names NOT listed here are the point: on the POLICY path (`evaluate_policy`)
+/// they block instead of slipping through.
+///
+/// That last sentence is true of the egress allowlist and NOT of the taint
+/// classifier, which shares this list: `taint_tracker::is_internal_url` fails
+/// OPEN on a name it does not recognise, labelling the action `EXTERNAL_TOOL`
+/// rather than `INTERNAL_API`. The two directions are deliberate -- refusing an
+/// unrecognised destination is safe, guessing that one is internal is not --
+/// but they are opposite, so read this list as "the names both paths agree on",
+/// not as a blocking guarantee everywhere it appears.
 pub const DEFAULT_EGRESS_DESTINATION_FIELDS: [&str; 7] = [
     "destination",
     "url",
@@ -529,23 +537,11 @@ pub struct SensitivePattern {
     pub category: String,
 }
 
-// ── Agent Behavioral Fingerprint (API response) ──
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentFingerprintResponse {
-    pub agent_id: String,
-    pub total_requests: u64,
-    pub tool_usage: HashMap<String, u64>,
-    pub action_types: HashMap<String, u64>,
-    pub avg_risk_score: f64,
-    pub peak_risk_score: f64,
-    pub hourly_pattern: [u64; 24],
-    pub anomaly_score: f64,
-    pub first_seen: String,
-    pub last_seen: String,
-    pub flags: Vec<String>,
-}
+// ponytail: `AgentFingerprintResponse` used to sit here. It occurred exactly once
+// repo-wide — its own definition. Both fingerprint routes serialize the engine's
+// `modules::fingerprint::behavioral::AgentFingerprint`, which is field-for-field
+// identical, so this was a stale duplicate that could drift from the type that
+// actually reaches the wire without anything noticing. Deleted in 2.1.0.
 
 // ── Rate Limiting ──
 

@@ -69,7 +69,6 @@ async fn build_test_state_with_plugin_registry(
         review_store: storage.clone(),
         policy_store: storage.clone(),
         api_key_store: storage.clone(),
-        tenant_store: storage.clone(),
         nhi_store: storage.clone(),
         session_store: storage.clone(),
         taint_store: storage.clone(),
@@ -308,7 +307,7 @@ async fn test_workspace_allow_rule_can_lower_review_to_allow() {
                     ..Default::default()
                 },
                 conditions: ConditionSet {
-                    max_risk_score: Some(35),
+                    max_adaptive_score: Some(35),
                     payload_contains: vec!["echo hello".into()],
                     ..Default::default()
                 },

@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main, master, "feat/1.0-**", "feat/1.2-**"]
+    # `audit/**` is where a release is assembled before it is proposed to main.
+    # Without it the release branch got its first CI run on the tag, i.e. after
+    # the decision to ship. (A PR into main already triggered the job below;
+    # this is about seeing red before opening one.)
+    branches: [main, master, "feat/1.0-**", "feat/1.2-**", "audit/**"]
     tags: ["v*"]
   pull_request:
     branches: [main, master]
@@ -41,9 +45,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # `postgres` is NOT a default feature, so the step above never compiles
-      # `storage/postgres.rs` and that file went unlinted through the release
-      # that shipped the INTEGER-decoded-as-i64 bug. Linting it is cheap; not
-      # linting half the storage layer is how a whole backend goes unchecked.
+      # `storage/postgres.rs`: half the storage layer went entirely unchecked.
+      #
+      # To be honest about what this buys: clippy would NOT have caught the
+      # INTEGER-decoded-as-i64 bug that shipped in 2.0.1. That was a runtime
+      # sqlx decode mismatch, invisible to a lint. What catches that class is
+      # `tests/backend_parity.rs` running against a real Postgres. This step
+      # buys ordinary lint coverage over a file that had none — worth having,
+      # and not a substitute for the parity tests.
       - name: Run clippy (postgres feature)
         run: cargo clippy -p iaga-sentinel-core --features postgres --all-targets -- -D warnings
 
@@ -291,6 +300,11 @@ jobs:
           # TypeScript SDK: register a fresh agent pool, then run the smoke checks.
           IAGA_SMOKE_AGENTS="$(node sdks/typescript/register-smoke-agents.cjs)" \
             node sdks/typescript/smoke.cjs
+          # The only end-to-end GovernedTool test. It is `#[ignore]`d because it
+          # needs a live sidecar with seeded demo data -- which is exactly what
+          # this step has had running since the `iaga serve --seed-demo` above,
+          # so it was one flag away from being covered and had never run in CI.
+          cargo test -p iaga-sentinel-mcp --test live -- --ignored
 
       - name: Offline verifier parity smoke (Node, node:crypto)
         # The Node half of the multilingual verifier (roadmap 1.3): reach the
@@ -324,6 +338,45 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pytest
           python -m pytest sdks/python/tests/test_iaga_verify.py -q
+
+  # Four of this release's security fixes landed under `plug-ins/`: the
+  # redirect bypass in the Letta and VoltAgent clients (a 302 to a hostile
+  # server made the client return that server's `decision: "allow"`, with no
+  # evidence anywhere) and the Bash hook reading a JSON *error* body as a
+  # verdict. Every one shipped with a regression test, and not one was
+  # reachable by any job: `plug-ins/` appeared in no workflow, and
+  # `codex-plugin` is not a workspace member, so `cargo test --workspace`
+  # never saw it either. A fix whose test never runs regresses at the next edit.
+  #
+  # Unit tiers only -- every test below stubs its own servers, so this needs no
+  # sidecar and no agent framework. `test:live` and `test:e2e` stay local.
+  plugins:
+    name: plug-ins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 22, not the 20 the `test` job pins: the VoltAgent unit tests are `.ts`
+      # executed straight through `node --test`, which needs type stripping.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Letta client + Claude Code hook regressions
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest
+          python -m pytest plug-ins/letta-plugin/tests plug-ins/claude-code-adapter -q
+
+      - name: VoltAgent client + hook unit tests
+        working-directory: plug-ins/voltagent-plugin
+        run: |
+          npm ci
+          npm test
 
   build:
     name: Build
@@ -379,8 +432,13 @@ jobs:
           key: ${{ runner.os }}-cargo-sanity-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-sanity-
-      - name: Build workspace (no tests)
-        run: cargo build --workspace
+      - name: Build workspace including tests
+        # `--all-targets`, so the TEST code is type-checked on Windows and
+        # macOS too. Without it this compiled only lib+bins, and since every
+        # Rust test job is ubuntu-only, a test that did not compile off-Linux
+        # reached main unnoticed. (The `python` job is already a 3-OS matrix;
+        # the gap was Rust-only.)
+        run: cargo build --workspace --all-targets
 
   # A `release` job used to sit here. It attached one bare, unversioned Linux
   # `iaga-sentinel` binary to the tag: no macOS, no Windows, no `iaga-verify`

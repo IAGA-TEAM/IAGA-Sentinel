@@ -41,6 +41,12 @@ export class SentinelClient {
     if (options.apiKey) {
       this.headers.Authorization = `Bearer ${options.apiKey}`;
     }
+    // Every method that mints one of these tells the caller to present it in
+    // this header; until 2.1.0 the client had no way to. ponytail: one header,
+    // set once -- a token is bound to one agent, and so is a client.
+    if (options.capabilityToken) {
+      this.headers["X-IAGA-Capability-Token"] = options.capabilityToken;
+    }
   }
 
   async inspect(request: InspectRequest): Promise<GovernanceResult> {
@@ -160,10 +166,14 @@ export class SentinelClient {
     return this.request<JsonObject[]>("/v1/auth/keys");
   }
 
-  async createKey(label: string): Promise<JsonObject> {
+  async createKey(
+    label: string,
+    scope: "admin" | "agent" = "admin",
+    agentId?: string,
+  ): Promise<JsonObject> {
     return this.request<JsonObject>("/v1/auth/keys", {
       method: "POST",
-      body: JSON.stringify({ label }),
+      body: JSON.stringify({ label, scope, ...(agentId ? { agentId } : {}) }),
     });
   }
 
@@ -256,6 +266,18 @@ export class SentinelClient {
     });
   }
 
+  /**
+   * Mint a capability token bound to `agentId`.
+   *
+   * Requires an ADMIN key (2.1.0): the route had no guard, so any agent-scoped
+   * key could mint `capabilities: ["*"]` for any agent.
+   *
+   * Present the returned `tokenId` in the `X-IAGA-Capability-Token` header to
+   * use it. `read:self` lets an agent read its own `/v1/profiles/{agentId}` and
+   * `/v1/analytics/agents/{agentId}`, which are otherwise admin-only. A token is
+   * bound to one agent and can never read another's data, whatever capabilities
+   * it carries.
+   */
   async issueToken(input: {
     agentId: string;
     capabilities: string[];
@@ -269,6 +291,29 @@ export class SentinelClient {
         ttlSeconds: input.ttlSeconds ?? 3600,
       }),
     });
+  }
+
+  /**
+   * Revoke a capability token. Requires an ADMIN key.
+   *
+   * Durable and fleet-wide: the stored row is the authority, so there is no
+   * in-process cache to go stale. New in 2.1.0 — revocation was implemented but
+   * had no route, so a token could never be withdrawn.
+   */
+  /**
+   * List the capability tokens currently outstanding. Requires an ADMIN key.
+   *
+   * Signatures are withheld: this answers "what is authorized right now", which
+   * is the question an operator asks before revoking. Without it the SDK could
+   * mint and revoke but not enumerate, so revoking meant already knowing the
+   * `tokenId` you were looking for.
+   */
+  async listTokens(): Promise<JsonObject[]> {
+    return this.request<JsonObject[]>("/v1/nhi/tokens");
+  }
+
+  async revokeToken(tokenId: string): Promise<void> {
+    await this.request<void>(`/v1/nhi/tokens/${tokenId}`, { method: "DELETE" });
   }
 
   async getRiskWeights(): Promise<JsonObject> {

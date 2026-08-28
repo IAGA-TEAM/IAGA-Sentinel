@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/media/badge-version.svg" alt="version 2.0.2" />
+  <img src="docs/media/badge-version.svg" alt="version 2.1.0" />
   <img src="docs/media/badge-license.svg" alt="license BUSL-1.1" />
   <img src="docs/media/badge-aiact.svg" alt="Supports EU AI Act Article 12 record-keeping" />
   <img src="docs/media/badge-rust.svg" alt="Rust stable" />
@@ -117,8 +117,8 @@ docker run -p 127.0.0.1:4010:4010 -e IAGA_SENTINEL_OPEN_MODE=true \
 > package is private and the tag push fails at manifest time with a `403`, for organisation-side
 > reasons documented in [`.github/workflows/docker.yml`](.github/workflows/docker.yml). Until that
 > is settled, build locally as above, or use `cargo install` below. The last publicly published
-> image is `ghcr.io/edoardobambini/iaga-sentinel:v1.8.1` — six releases behind (1.9.0, 1.9.1,
-> 1.9.2, 2.0.0, 2.0.1, 2.0.2); do not evaluate this release with it.
+> image is `ghcr.io/edoardobambini/iaga-sentinel:v1.8.1` — seven releases behind (1.9.0, 1.9.1,
+> 1.9.2, 2.0.0, 2.0.1, 2.0.2, 2.1.0); do not evaluate this release with it.
 
 The operator dashboard is at <http://localhost:4010/>. Send it an agent action and it decides, scores the risk, and mints a signed receipt:
 
@@ -133,12 +133,11 @@ curl -s -X POST http://localhost:4010/v1/inspect -H 'Content-Type: application/j
 
 ### Prove it offline (no server, no network)
 
-The receipt chain verifies with no server, no database and no network, using the standalone `iaga-verify` binary. That binary isn't in the Docker image, so install the CLI — this one really does work without a
-clone — and run the same flow locally:
+The receipt chain verifies with no server, no database and no network, using the standalone `iaga-verify` binary. That binary isn't in the Docker image, so build the CLI from this checkout and run the same flow locally:
 
 ```bash
-cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.0.2 --locked \
-  iaga-sentinel-core iaga-sentinel-verify
+cargo install --path crates/iaga-sentinel-core --locked
+cargo install --path crates/iaga-sentinel-verify --locked
 # Open mode makes every unauthenticated caller an implicit ADMIN while no API key exists, and the
 # server's own default bind host is 0.0.0.0 — without IAGA_SENTINEL_HOST this publishes an admin
 # API to the whole LAN. There is no --host flag; the bind interface is env-only.
@@ -149,8 +148,21 @@ IAGA_SENTINEL_HOST=127.0.0.1 IAGA_SENTINEL_OPEN_MODE=true \
 ```bash
 iaga replay --list                          # find the run_id
 iaga replay <run_id> --export chain.json
-iaga-verify chain.json                      # -> CHAIN OK
+iaga-verify chain.json --key <hex-ed25519-pubkey>   # -> CHAIN OK
 ```
+
+> [!NOTE]
+> **Pin the key.** Record the hex once from your own first export
+> (`jq -r .signer_verifying_key chain.json`) and pass it as `--key` from then on. Without `--key`
+> the verifier falls back to the key embedded in the file, which checks only that the chain is
+> internally consistent — a forger who re-signed it supplied that key too. The verifier says so on
+> stderr and stamps `key=embedded` on the `CHAIN OK` line.
+>
+> The commands above install from this checkout. To install without cloning, use the release tag:
+> `cargo install --git https://github.com/IAGA-TEAM/IAGA-Sentinel --tag v2.1.0 --locked iaga-sentinel-core iaga-sentinel-verify`.
+> To check a chain with no build at all, use the dependency-free verifiers:
+> `python sdks/python/iaga_verify.py chain.json --key <hex-ed25519-pubkey>` and
+> `node sdks/typescript/verify.mjs chain.json --key <hex-ed25519-pubkey>`.
 
 Postgres (`--features postgres` + `DATABASE_URL`) and `docker compose up -d` are covered in the docs.
 
@@ -186,7 +198,7 @@ the ones a human types. Full standing procedure: [`AGENTS.md`](AGENTS.md).
 
 ---
 
-## Test me now (2.0.2)
+## Test me now (2.1.0)
 
 Do not take our word for it. The repository ships a self-contained demo kit that drives three real verdicts through the live pipeline and proves the receipt offline, on your own machine. Nothing is faked, and you get the same verdicts every run (the verdicts are stable; the exact risk integers drift slightly with agent trust, which the pipeline updates after each action). Two scripts under [`scripts/`](scripts/) and a runbook in [`docs/demo/README.md`](docs/demo/README.md). The primary path is Windows PowerShell; Linux and macOS use the `.sh` twins.
 
@@ -297,7 +309,7 @@ Research-validated, not marketing-validated.
 > **New in 1.7.1: documentation and honesty hygiene.** No code-path or wire change — receipts, policy evaluation, and the default build are byte-identical to 1.7.0. The boot banner and the architecture notes now state the real pipeline depth (**8 layers**, two of them — sandbox and formal-verify — advisory and not part of the verdict) instead of the old "12 layers" headline; `.cargo/audit.toml` documents which optional/compile-time path pulls each of the three ignored RUSTSEC advisories (none is in the default build, re-verified with `cargo tree`); and the workspace, SDK manifests, and BUSL `Licensed Work` line are aligned to the release. See the [CHANGELOG](CHANGELOG.md).
 
 > [!NOTE]
-> **New in 1.7.0: OSS backlog closure.** Two deterministic Dictum builtins land — `timestamp()` (RFC3339 to epoch, so policies express temporal ranges with the ordinary numeric operators) and `sha256()` (content hashing). The MCP surface gains `iaga mcp-doctor` (health-check any MCP endpoint: handshake, tool-schema shape, and which calls the policy engine would block) and the `iaga-sentinel-mcp` crate exposing `iaga::mcp::GovernedTool` for Rust agents. The threat-feed **format** opens (`threat-intel.toml`, loaded via `IAGA_SENTINEL_THREAT_FEED`; the curated signed feed stays Enterprise), SBOM ingest learns SPDX next to CycloneDX, and `iaga plugin attest --slsa-level N` emits offline in-toto/SLSA statements (DSSE-signable; the level is operator-declared, not verified). All additive — receipts from earlier releases still verify byte-for-byte, and every OSS receipt stays `is_authoritative:false`. See the [CHANGELOG](CHANGELOG.md).
+> **New in 1.7.0: OSS backlog closure.** Two deterministic Dictum builtins land — `timestamp()` (RFC3339 to epoch, so policies express temporal ranges with the ordinary numeric operators) and `sha256()` (content hashing). The MCP surface gains `iaga mcp-doctor` (health-check any MCP endpoint: handshake, tool-schema shape, and which calls the policy engine would block) and the `iaga-sentinel-mcp` crate exposing `iaga::mcp::GovernedTool` for Rust agents. The threat-feed **format** opens (`threat-intel.toml`, loaded via `IAGA_SENTINEL_THREAT_FEED`; the curated signed feed stays Enterprise), SBOM ingest learns SPDX next to CycloneDX, and `iaga plugins attest --slsa-level N` emits offline in-toto/SLSA statements (DSSE-signable; the level is operator-declared, not verified; the subcommand is compiled only with `--features plugin-attestation`, which is not in the default build). All additive — receipts from earlier releases still verify byte-for-byte, and every OSS receipt stays `is_authoritative:false`. See the [CHANGELOG](CHANGELOG.md).
 
 > [!NOTE]
 > **New in 1.5.6: the policy language is now Dictum.** The typed policy DSL (formerly APL / Agent Policy Language) is renamed to Dictum end to end: the `.dictum` file extension, the `iaga-sentinel-dictum` crate, the `dictum` build feature, and the `dictum[...]` reason recorded on every audit event and signed receipt. The rename is behavior-preserving: the signed-receipt wire format stays byte-identical (the `apl_eval_trace` field is kept). See [ADR 0004](docs/adr/0004-dictum-mvp.md) and the [CHANGELOG](CHANGELOG.md).
@@ -305,7 +317,7 @@ Research-validated, not marketing-validated.
 > [!NOTE]
 > **New in 1.5.4: the policy language now enforces what it promised.** The Dictum `secret_ref()` builtin actually detects credentials and PII inside a tool payload (it was a placeholder that always returned false), and a new `url_host()` builtin gives a policy a real per-host egress allowlist that also defeats look-alike-domain bypasses. Three core fixes ship alongside: the workspace egress allowlist is URL-aware, so a full URL to an allowed host is no longer over-blocked; every `block` or `review` now carries its cause in the audit event and the signed receipt, with no silent escalation; and signed receipts hash-chain across a session, so a multi-step run forms one tamper-evident hash chain. See [ADR 0023](docs/adr/0023-dictum-secret-detection-host-egress.md) and the [CHANGELOG](CHANGELOG.md).
 
-Current release: **2.0.2** ([release notes](CHANGELOG.md)). CI runs the full workspace test suite (default and `--all-features`), live-Postgres receipt tests, SDK end-to-end smokes against a real sidecar, and clippy with `-D warnings`. All green from a clean checkout.
+Current release: **2.1.0** ([release notes](CHANGELOG.md)). CI runs the full workspace test suite (default and `--all-features`), live-Postgres receipt tests, SDK end-to-end smokes against a real sidecar, and clippy with `-D warnings`. All green from a clean checkout.
 
 ---
 

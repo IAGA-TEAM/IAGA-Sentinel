@@ -98,6 +98,27 @@ def _emit(decision: "str | None", reason: str = "") -> None:
     sys.exit(0)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow a redirect to the sidecar.
+
+    ``urlopen`` uses the default opener, which follows 301/302/303 (re-issuing a
+    POST as a GET) and 307/308. Measured on the TypeScript SDK, that was a
+    complete governance bypass: a 307 from the configured URL to an
+    attacker-controlled server made the client return that server's
+    ``decision: "allow"`` with no evidence anywhere. Returning ``None`` is
+    urllib's documented "do not follow" signal, so the original 3xx surfaces as
+    an ``HTTPError`` and lands in the fail-open/fail-closed policy below.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+
 def _unreachable(fail_closed: bool, detail: str) -> None:
     """Apply the transport-error policy: fail-open (default) or fail-closed."""
     if fail_closed:
@@ -154,13 +175,18 @@ def main() -> None:
     )
 
     try:
-        with urllib.request.urlopen(http_request, timeout=timeout) as response:
+        with _OPENER.open(http_request, timeout=timeout) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             _unreachable(
                 fail_closed,
                 f"agent '{request['agentId']}' not registered at IAGA (404)",
+            )
+        if exc.code in _REDIRECT_CODES:
+            _unreachable(
+                fail_closed,
+                f"IAGA redirected (HTTP {exc.code}); refusing to follow",
             )
         _unreachable(fail_closed, f"IAGA returned HTTP {exc.code}")
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:

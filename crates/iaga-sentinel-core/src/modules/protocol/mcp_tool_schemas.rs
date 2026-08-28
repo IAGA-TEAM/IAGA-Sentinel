@@ -16,9 +16,30 @@ pub fn validate_schema(tool_name: &str, payload: &HashMap<String, Value>) -> (bo
         "filesystem.write" => validate_filesystem_write(payload),
         "terminal.exec" => validate_terminal_exec(payload),
         "http.fetch" => validate_http_fetch(payload),
+        // ADVISORY, not a violation. "I have no schema for this tool" and "this
+        // payload is malformed" are different statements, and only the second
+        // should gate.
+        //
+        // Returning `false` here made `iaga proxy` unusable against every real
+        // MCP server: `execute_pipeline` turns any `!valid` into an
+        // unconditional `minimum_decision = Block`, so a fully registered agent
+        // with a workspace policy listing the downstream tool at
+        // `maxDecision: allow` still got `block` on 100% of tool calls — the
+        // refusal landed before policy was ever consulted, and no configuration
+        // could lift it. Four hardcoded names cannot be the allowlist for an
+        // open protocol.
+        //
+        // Nothing is smuggled through: an unregistered tool is still refused by
+        // the workspace tool registry (`approvedTools`), and the domain
+        // allowlist, taint tracker and injection firewall all still run. The
+        // gap is recorded in the findings so the evidence says plainly that no
+        // structural check was available for this tool.
         _ => (
-            false,
-            vec![format!("no MCP schema registered for tool {tool_name}")],
+            true,
+            vec![format!(
+                "schema: advisory — no MCP schema registered for tool {tool_name}; \
+                 structural validation skipped, policy layers still applied"
+            )],
         ),
     }
 }
@@ -271,12 +292,31 @@ mod tests {
         assert!(!valid, "a whitespace-only destination must not satisfy it");
     }
 
+    /// An unregistered tool is a GAP in this build's knowledge, not a defect in
+    /// the caller's payload — so it is advisory, not a validation failure.
+    ///
+    /// This test previously asserted the opposite (`assert!(!valid)`), which is
+    /// how the behaviour survived: `execute_pipeline` turns any `!valid` into an
+    /// unconditional Block, so every tool of every real MCP server was refused
+    /// before policy was consulted, and `iaga proxy` blocked 100% of calls with
+    /// no configuration able to lift it. Four hardcoded names cannot be the
+    /// allowlist for an open protocol.
+    ///
+    /// The finding is still emitted, so the evidence records that no structural
+    /// check was available, and the layers that DO know the tool — the workspace
+    /// tool registry, the domain allowlist, taint, the firewall — still decide.
     #[test]
-    fn unknown_tool_is_invalid() {
+    fn unknown_tool_is_advisory_not_invalid() {
         let (valid, findings) = validate_schema("totally.unknown", &payload(&[]));
-        assert!(!valid);
-        assert!(findings
-            .iter()
-            .any(|f| f.contains("no MCP schema registered")));
+        assert!(
+            valid,
+            "an unknown tool must not gate the verdict: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.contains("no MCP schema registered") && f.contains("totally.unknown")),
+            "the gap must be named in the evidence: {findings:?}"
+        );
     }
 }

@@ -216,8 +216,33 @@ pub fn score_tool_risk_with_thresholds(
         score_decision
     };
 
+    // A refusal always says why it refused.
+    //
+    // "no high-risk rule matched" is a true statement about RULE matching, and
+    // it was emitted whenever nothing had pushed a reason — including when the
+    // verdict came from the composite score crossing a threshold rather than
+    // from any single layer vetoing. That produced a `block` whose only stated
+    // reason was that nothing matched, and because `reasons` is copied verbatim
+    // into the signed `ReceiptBody`, the self-contradiction was written into the
+    // audit event, the human review queue and the cryptographic evidence.
+    //
+    // An operator reading "no high-risk rule matched" next to "block" cannot act
+    // on it, and on an evidence product the receipt is the deliverable. So the
+    // fallback now depends on what was actually decided: only an Allow can say
+    // nothing matched; anything else names the score and the threshold it
+    // reached, which is precisely what happened.
     if reasons.is_empty() {
-        reasons.push("no high-risk rule matched".to_string());
+        reasons.push(match final_decision {
+            GovernanceDecision::Allow => "no high-risk rule matched".to_string(),
+            GovernanceDecision::Review => format!(
+                "composite risk score {score} reached the review threshold ({threshold_review}); \
+                 no single layer vetoed"
+            ),
+            GovernanceDecision::Block => format!(
+                "composite risk score {score} reached the block threshold ({threshold_block}); \
+                 no single layer vetoed"
+            ),
+        });
     }
 
     // DET-REASONS-MERGE: `reasons` is copied verbatim into the signed ReceiptBody,

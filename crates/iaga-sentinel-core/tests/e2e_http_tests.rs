@@ -94,7 +94,6 @@ async fn spawn_test_server_inner(
         review_store: storage.clone(),
         policy_store: storage.clone(),
         api_key_store: storage.clone(),
-        tenant_store: storage.clone(),
         nhi_store: storage.clone(),
         session_store: storage.clone(),
         taint_store: storage.clone(),
@@ -776,13 +775,18 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
     // Admin creates an agent-scoped key.
     let created = admin
         .post(format!("{}/v1/auth/keys", server.base_url()))
-        .json(&serde_json::json!({ "label": "e2e-agent-key", "scope": "agent" }))
+        .json(&serde_json::json!({
+            "label": "e2e-agent-key",
+            "scope": "agent",
+            "agentId": "openclaw-builder-01"
+        }))
         .send()
         .await
         .expect("create agent key should succeed");
     assert_eq!(created.status(), StatusCode::CREATED);
     let created_json: Value = created.json().await.expect("create key JSON");
     assert_eq!(created_json["scope"], "agent");
+    assert_eq!(created_json["agentId"], "openclaw-builder-01");
     let agent_key = created_json["key"]
         .as_str()
         .expect("raw key returned once")
@@ -802,6 +806,53 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
         "/v1/audit/stats",
         "/v1/receipts",
         "/v1/receipts/any-run",
+        // The READ halves of the same governance surface whose WRITE halves
+        // #14/#18 already closed. They were never reviewed and stayed open, so
+        // an agent key could enumerate every agent's analytics, the whole human
+        // review queue, and every profile and workspace policy.
+        //
+        // `/v1/workspaces` is the sharpest of these: the policy body carries
+        // `threshold_block` and `threshold_review`, which is the exact number an
+        // agent needs in order to tune itself to just under the block line.
+        "/v1/analytics/agents",
+        "/v1/reviews",
+        "/v1/profiles",
+        "/v1/workspaces",
+        "/v1/workspaces/any-workspace",
+        "/v1/policy/verify/any-workspace",
+        // The SSE firehose carries every tenant's ActionGoverned event live.
+        // Safe to assert here and only here: `RequireAdmin` rejects during
+        // extraction, before the stream opens, so this GET completes with a JSON
+        // body. An ADMIN request to this path would never return, so no positive
+        // case for it belongs in any test.
+        "/v1/events/stream",
+        // The rest of the cross-agent read surface, closed in 2.1.0 with the
+        // six above. Enumerating every route and its guard turned these up:
+        // closing the SSE stream while `/v1/telemetry/spans` still answered was
+        // shutting one door and leaving the next one open on the same data.
+        //
+        // The telemetry buffer is the sharpest: `otel_emitter` records
+        // `agent.id`, `tool.name`, `governance.decision` and `risk.score` for
+        // EVERY governed action and keeps 10_000 of them, newest first, so a
+        // poll loop reconstructs exactly the firehose the SSE gate refuses.
+        "/v1/telemetry/spans",
+        "/v1/telemetry/metrics",
+        "/v1/telemetry/export",
+        // `GET /v1/workspaces/{id}` is admin because the policy body carries the
+        // block/review thresholds. The rules of that same workspace are the
+        // other half of the same policy, and its POST twin was already admin.
+        "/v1/workspaces/any-workspace/rules",
+        // Every registered agent id, SPIFFE id, key commitment and trust score:
+        // the target list for the per-agent reads this release closes.
+        "/v1/nhi/identities",
+        // Other agents' behavioural records, session graphs, held-back actions
+        // and spend. `/v1/sandbox/pending` was the asymmetric one -- its
+        // approve/reject twins have been admin-only since 1.x.
+        "/v1/fingerprint",
+        "/v1/sessions",
+        "/v1/sessions/any-session/metrics",
+        "/v1/sandbox/pending",
+        "/v1/cost/by-agent",
     ];
     for path in admin_get_endpoints {
         let resp = agent
@@ -816,6 +867,50 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
         );
         let body: Value = resp.json().await.expect("error body JSON");
         assert_eq!(body["error"], "admin_scope_required");
+    }
+
+    // The PER-AGENT reads are also closed to a bare agent key, but they answer
+    // `capability_required` rather than `admin_scope_required`: an agent CAN
+    // reach its own record, by presenting a `read:self` capability token bound
+    // to that agent id. Asserted separately so the two refusals stay
+    // distinguishable — "you must be an operator" is not the same answer as
+    // "your token does not carry this". The positive path lives in
+    // `capability_tokens.rs`.
+    //
+    // Which of the two refusals you get depends on WHOSE record you ask for,
+    // because `authorize_agent_scope` checks the key's binding before it looks
+    // at the token: asking for your own answers `capability_required`, asking
+    // for somebody else's answers `agent_scope_mismatch` and never reaches the
+    // token at all. Both are 403. Asserting only one of them — as this test did
+    // until 2.1.0, on `any-agent` paths — measured the wrong door.
+    let capability_get_paths = [
+        "/v1/analytics/agents/{}",
+        "/v1/profiles/{}",
+        // Named in the `CAP_READ_SELF` doc alongside analytics and profile.
+        // Until 2.1.0 that doc described two routes it had closed and two it
+        // had not; these are the two, so the sentence is now true of all four.
+        "/v1/fingerprint/{}",
+        "/v1/rate-limit/status/{}",
+    ];
+    for (who, expected) in [
+        ("openclaw-builder-01", "capability_required"),
+        ("some-other-agent", "agent_scope_mismatch"),
+    ] {
+        for template in capability_get_paths {
+            let path = template.replace("{}", who);
+            let resp = agent
+                .get(format!("{}{}", server.base_url(), path))
+                .send()
+                .await
+                .expect("agent request should complete");
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "agent key must not read {path} without a capability token"
+            );
+            let body: Value = resp.json().await.expect("error body JSON");
+            assert_eq!(body["error"], expected, "for {path}");
+        }
     }
     let admin_post_endpoints = [
         ("/v1/auth/keys", serde_json::json!({ "label": "nope" })),
@@ -859,6 +954,17 @@ async fn test_http_agent_scope_cannot_administer_gateway() {
         // scope guard runs before the lookup.
         ("/v1/sandbox/no-such-id/approve", serde_json::json!({})),
         ("/v1/sandbox/no-such-id/reject", serde_json::json!({})),
+        // Resolving a review is the same operator decision as releasing a
+        // sandboxed action: an agent key must not approve the action it was
+        // held back on. It never released the execution - nothing re-reads the
+        // status - but it published `ReviewResolved` and the console then
+        // showed the entry as settled by a human, which is a forged evidence
+        // record. Same trick as above: the id need not exist, because the scope
+        // guard runs before the review lookup.
+        (
+            "/v1/reviews/no-such-review",
+            serde_json::json!({ "status": "approved" }),
+        ),
     ];
     for (path, body) in admin_post_endpoints {
         let resp = agent

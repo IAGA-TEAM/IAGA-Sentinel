@@ -126,3 +126,32 @@ fn bad_key_hex_errors() {
     let err = verify_export(&export, Some("not-hex")).unwrap_err();
     assert!(err.to_string().contains("invalid public key"));
 }
+
+#[test]
+fn relabelled_export_run_id_is_rejected() {
+    // The envelope's `run_id` is not covered by any signature, so a chain of
+    // genuinely signed receipts can be relabelled to a run that never happened.
+    // Every signature still verifies and every hash link still holds; only the
+    // story the export tells about itself is false.
+    //
+    // This is not hypothetical drift. Measured live during the 2.1.0 user test:
+    // this verifier printed `CHAIN OK run_id=run-that-never-happened:INVENTED`
+    // and exited 0 on a file that the Python and Node verifiers both refused
+    // with exit 1 — breaking the one promise sdks/conformance/README.md makes,
+    // that all three reach the same verdict with the same exit codes. Nothing
+    // caught it because nothing asserted it.
+    let signer = ReceiptSigner::generate();
+    let chain = build_chain(&signer, 3);
+    let mut export = export_for(&signer, chain);
+    export.run_id = "run-that-never-happened:INVENTED".into();
+    let (status, _) = verify_export(&export, None).expect("verify returns");
+    match status {
+        ChainStatus::Broken { reason, .. } => {
+            assert!(
+                reason.contains("run_id mismatch"),
+                "expected a run_id mismatch, got: {reason}"
+            );
+        }
+        other => panic!("expected Broken, got {other:?}"),
+    }
+}

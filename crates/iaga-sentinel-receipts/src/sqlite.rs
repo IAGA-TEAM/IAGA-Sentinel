@@ -218,26 +218,26 @@ impl ReceiptStore for SqliteReceiptStore {
             let first_ts: String = r.try_get("first_ts")?;
             let last_ts: String = r.try_get("last_ts")?;
 
-            // Fetch terminal verdict (latest receipt's verdict).
+            // Terminal verdict, read out of the SIGNED body rather than the
+            // denormalized `verdict` column beside it. The column is convenient
+            // and mutable: an UPDATE flipping it from 'block' to 'allow' left
+            // `replay --list` and `GET /v1/receipts` reporting Allow while the
+            // sealed evidence in the same row still said Block, and nothing
+            // flagged the divergence. `body_json` is the bytes the signature
+            // covers, so this surface now agrees with the verifier by
+            // construction. One parse per listed run; the column stays for the
+            // indexed WHERE/ORDER BY that the read path uses.
             let verdict_row = sqlx::query(
-                "SELECT verdict FROM receipts WHERE run_id = ? \
+                "SELECT body_json FROM receipts WHERE run_id = ? \
                  ORDER BY seq DESC LIMIT 1",
             )
             .bind(&run_id)
             .fetch_one(&self.pool)
             .await?;
-            let verdict_str: String = verdict_row.try_get("verdict")?;
-            let terminal_verdict = match verdict_str.as_str() {
-                "allow" => Verdict::Allow,
-                "review" => Verdict::Review,
-                "block" => Verdict::Block,
-                other => {
-                    return Err(ReceiptError::Storage(format!(
-                        "invalid verdict in DB: {}",
-                        other
-                    )))
-                }
-            };
+            let body_json: String = verdict_row.try_get("body_json")?;
+            let body: ReceiptBody = serde_json::from_str(&body_json)
+                .map_err(|e| ReceiptError::Storage(format!("invalid receipt body in DB: {e}")))?;
+            let terminal_verdict = body.verdict;
             out.push(RunSummary {
                 run_id,
                 receipt_count: cnt as u64,

@@ -21,6 +21,12 @@ pub const SHELL_OUTPUT: &str = "shell_output";
 pub const DB_RESULT: &str = "db_result";
 pub const NETWORK_RESPONSE: &str = "network_response";
 
+/// The pseudo action type `scan_response` passes so the taint layer classifies
+/// an inbound tool response as [`SinkType::ToolResponse`] rather than as
+/// network egress. Not an `ActionType` variant: nothing governs a response as
+/// an action, and adding one would change the public request schema.
+pub const TOOL_RESPONSE_ACTION: &str = "tool_response";
+
 // ── Sink Types ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +37,9 @@ pub enum SinkType {
     DbWrite,
     EmailSend,
     LogOutput,
+    /// Data arriving BACK from a tool. Not an egress sink: nothing leaves the
+    /// perimeter here, so the labels that describe outbound flow do not apply.
+    ToolResponse,
 }
 
 impl std::fmt::Display for SinkType {
@@ -42,6 +51,7 @@ impl std::fmt::Display for SinkType {
             SinkType::DbWrite => write!(f, "db_write"),
             SinkType::EmailSend => write!(f, "email_send"),
             SinkType::LogOutput => write!(f, "log_output"),
+            SinkType::ToolResponse => write!(f, "tool_response"),
         }
     }
 }
@@ -92,6 +102,35 @@ fn default_policies() -> Vec<TaintPolicy> {
             forbidden: &[SECRET],
             severity: "high",
             description: "Secrets must never appear in log output",
+        },
+        // A tool RESPONSE is inbound data, so only "what came back" is in
+        // scope; LOCAL_FS and DB_RESULT describe where data came FROM and are
+        // deliberately absent. `scan_response` used to pass `"http"`, which
+        // classified an inbound payload as NetworkEgress, whose forbidden set
+        // DOES include them -- and since the inherited SESSION labels are folded
+        // in, one `file_read` anywhere in a session made every later
+        // `/v1/response/scan` in that session Block at risk 80 no matter what
+        // the response contained. "read a file, then summarise it" was broken
+        // deterministically from the second step, and each false Block also
+        // wrote a signed audit record.
+        //
+        // `high`, so a secret arriving in a tool response still BLOCKS. Catching
+        // exactly that is what `/v1/response/scan` is for, and an earlier draft
+        // of this policy used `medium` -- which fixed the LOCAL_FS false positive
+        // by deleting the credential detection that shared the sink. Measured
+        // against 2.0.2: every `.cred/*` case (Anthropic, AWS, GitHub, Slack,
+        // Stripe keys, bare and inside code fences, env dumps, JSON and log
+        // lines) went from Block/80 to Allow/0.
+        //
+        // The description deliberately avoids "network" and "email", which is
+        // what `exfiltration_detected` keys off: a secret arriving FROM a tool is
+        // a leak into the agent's context, not data leaving the perimeter. The
+        // verdict and the score are unchanged; only that one finding string goes.
+        TaintPolicy {
+            sink: SinkType::ToolResponse,
+            forbidden: &[SECRET],
+            severity: "high",
+            description: "Tool response carries secret material",
         },
     ]
 }
@@ -215,10 +254,10 @@ static AGENT_TAINTS: Lazy<Mutex<HashMap<String, TimestampedTaint>>> =
 /// Taint is keyed on a `sessionId` the CLIENT chooses, so rotating that id
 /// erases the correlation between reading a credential and posting it out.
 /// Aggregating by `agent_id` in parallel closes that specific move — but
-/// `agent_id` is ALSO client-declared (`InspectRequest::agent_id` is a free
-/// string; an API key carries id/label/scope and is not bound to an agent), so
-/// the raise is from "rotate one field" to "rotate two". Modest, and worth
-/// stating plainly rather than selling.
+/// `agent_id` remains a request field, but an agent-scoped API key is now bound
+/// to exactly one value and the HTTP surface rejects substitutions. Admin and
+/// local MCP callers can still choose it, so this is correlation evidence, not
+/// proof of a process identity.
 ///
 /// The cost is not modest, and it is not a risk but a certainty on one traffic
 /// shape. The measured attack posts to an ALLOWLISTED host, so under agent
@@ -229,8 +268,8 @@ static AGENT_TAINTS: Lazy<Mutex<HashMap<String, TimestampedTaint>>> =
 ///
 /// Binding `sessionId` to the NHI identity — so an agent cannot present a
 /// session id it was never issued — is the fix that would not have this cost.
-/// It needs an agent/credential binding that does not exist yet, and belongs in
-/// its own change.
+/// It needs server-issued session identities in addition to the API-key binding
+/// added in 2.1.0, and belongs in its own change.
 pub fn agent_taint_window() -> Option<std::time::Duration> {
     let secs = crate::config::env::env_parse(AGENT_TAINT_WINDOW_ENV, 0u64);
     (secs > 0).then(|| std::time::Duration::from_secs(secs))
@@ -459,7 +498,60 @@ fn has_secret_content(text: &str) -> bool {
         "aws_secret",
         "password",
     ];
-    patterns.iter().any(|p| lower.contains(p)) || contains_openai_like_key(&lower)
+    patterns.iter().any(|p| lower.contains(p))
+        || contains_openai_like_key(&lower)
+        || contains_url_credentials(text)
+        // The same table `/v1/response/scan` uses, so the two directions cannot
+        // drift apart again.
+        //
+        // The list above is substring-based, which only finds a credential that
+        // carries a giveaway WORD — `api_key`, `password`, `bearer `. A
+        // credential that is just an opaque token with a distinctive SHAPE has
+        // no such word, and the one this misses today is the AWS access key id:
+        // measured on a live 2.1.0 server, `AKIAIOSFODNN7EXAMPLE` scored
+        // `review`/70 on the response path and `allow`/2 with "no high-risk rule
+        // matched" on inspect. (`ghp_`, `-----begin` and URL credentials were
+        // already covered by the list and `contains_url_credentials`; naming
+        // them here would overstate what this line adds.)
+        //
+        // What it really buys is PARITY: a credential family added to the
+        // response scanner from now on reaches the egress path for free, which
+        // is what `tests/egress_credential_parity.rs` asserts — parity, not a
+        // fixed list. The regexes are anchored and specific
+        // (`\bAKIA[0-9A-Z]{16}\b`), so this widens what is DETECTED without
+        // widening what is guessed at; the negative cases in that test pin it.
+        //
+        // Neither detector knows Stripe, Slack or Google keys. That is a real
+        // gap in the TABLE, shared by both directions, and it is a separate
+        // change from making the two agree.
+        || crate::pipeline::execute_pipeline::contains_known_credential(text)
+}
+
+/// A password embedded in a URL's userinfo: `scheme://user:secret@host`.
+///
+/// A real credential family the substring list never covered. It was caught
+/// only by accident until 2.1.0: `postgres://admin:hunter2@db.internal/prod`
+/// matched the old `is_internal_url` sweep on the substring `.internal`, so it
+/// was labelled INTERNAL_API and blocked as a would-be egress. Fixing that
+/// sweep to read only the destination removed the accident, and this puts the
+/// credential back under the detector that should have owned it -- so a DB
+/// connection string is now blocked because it CONTAINS A PASSWORD, not because
+/// its hostname happened to end in `.internal`.
+///
+/// Deliberately narrow: the userinfo must carry a colon, so `https://host/p`
+/// and `mailto:a@b.com` do not match.
+fn contains_url_credentials(text: &str) -> bool {
+    text.match_indices("://").any(|(i, _)| {
+        let after = &text[i + 3..];
+        let authority = after
+            .split(['/', '?', '#', ' ', '"', '\'', '\n', '\t'])
+            .next()
+            .unwrap_or("");
+        match authority.rsplit_once('@') {
+            Some((userinfo, host)) => !host.is_empty() && userinfo.contains(':'),
+            None => false,
+        }
+    })
 }
 
 fn contains_openai_like_key(text: &str) -> bool {
@@ -467,18 +559,95 @@ fn contains_openai_like_key(text: &str) -> bool {
         .any(|token| token.starts_with("sk-") && token.len() >= 20)
 }
 
+/// Values in `payload_str` that NAME a destination, never the body.
+///
+/// `DEFAULT_EGRESS_DESTINATION_FIELDS` is the repo's own answer to "which key
+/// holds the target", already used by the egress allowlist, so taint and the
+/// allowlist now read the same seven names. A payload that is not a JSON object
+/// is itself the candidate: several callers (and the fuzz target) pass a bare
+/// URL string.
+fn destination_candidates(payload_str: &str) -> Vec<String> {
+    match serde_json::from_str::<serde_json::Value>(payload_str) {
+        Ok(value @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
+            let mut out = Vec::new();
+            collect_destinations(&value, false, &mut out);
+            out
+        }
+        _ => vec![payload_str.to_string()],
+    }
+}
+
+/// Collect every string sitting under one of the seven destination names.
+///
+/// The first cut of the narrowing read `map.iter()` once and kept only direct
+/// string values, so it saw a destination ONLY when the payload was a flat
+/// object with the URL as an immediate string. `{"request":{"url":...}}`,
+/// `{"url":[...]}` and a top-level array all produced no candidate at all and
+/// fell to the `else` in `classify_source`, which labels `EXTERNAL_TOOL` -- so
+/// the narrowing turned a missed destination into a fail-OPEN.
+///
+/// `under` carries through ARRAYS but not through OBJECTS: a list under `url`
+/// is a list of destinations, so every string in it is a candidate, but an
+/// object under `target` is a structure whose keys have to earn it again. That
+/// asymmetry is load-bearing. Letting the latch cross objects reopens the very
+/// false positive the narrowing was written to kill, one level deeper:
+/// `host_of("10.50")` returns `"10.50"`, which matches the `"10."` prefix, so
+/// `{"target":{"amount":"10.50"}}` would be labelled `INTERNAL_API` and signed
+/// as EXFILTRATION DETECTED. `{"webhook":{"href":...}}` still works, because
+/// `href` is itself one of the seven.
+fn collect_destinations(value: &serde_json::Value, under: bool, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if under {
+                out.push(s.clone());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_destinations(item, under, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                let named = crate::core::types::DEFAULT_EGRESS_DESTINATION_FIELDS
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(key));
+                collect_destinations(child, named, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether a destination points inside the perimeter.
+///
+/// Anchored to the host, which is the only place these patterns were ever meant
+/// to apply. Matching them as substrings of the whole serialized payload is what
+/// made `"10."` fire inside `"10.50"` and `.local`/`.corp` fire inside ordinary
+/// prose: that labelled benign traffic INTERNAL_API, which `default_policies`
+/// forbids at `NetworkEgress` with severity `critical`, so the request was
+/// blocked and a *signed* receipt carried EXFILTRATION DETECTED for a payment
+/// amount. Narrowing the input is the fix; anchoring is what lets `10.` stay,
+/// and dropping it instead would have removed the only coverage of 10.0.0.0/8.
+fn is_internal_host(destination: &str) -> bool {
+    let host = crate::modules::policy::evaluate_policy::host_of(destination);
+    if host.is_empty() {
+        return false;
+    }
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.ends_with(".internal")
+        || host.ends_with(".local")
+        || host.ends_with(".corp")
+}
+
 fn is_internal_url(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    let patterns = [
-        "localhost",
-        "127.0.0.1",
-        "10.",
-        "192.168.",
-        ".internal",
-        ".local",
-        ".corp",
-    ];
-    patterns.iter().any(|p| lower.contains(p))
+    destination_candidates(text)
+        .iter()
+        .any(|candidate| is_internal_host(candidate))
 }
 
 pub fn classify_source(action_type: &str, _tool_name: &str, payload_str: &str) -> Vec<String> {
@@ -515,6 +684,7 @@ pub fn classify_source(action_type: &str, _tool_name: &str, payload_str: &str) -
 pub fn classify_sink(action_type: &str, tool_name: &str) -> Option<SinkType> {
     match action_type {
         "http" => Some(SinkType::NetworkEgress),
+        TOOL_RESPONSE_ACTION => Some(SinkType::ToolResponse),
         "email" => Some(SinkType::EmailSend),
         "file_write" => Some(SinkType::FileWrite),
         "shell" => Some(SinkType::ShellExec),

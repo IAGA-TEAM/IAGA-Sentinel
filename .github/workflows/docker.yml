@@ -14,7 +14,23 @@ permissions:
   packages: write
 
 jobs:
+  # Same gate as `release.yml`: a tag must not push an image that has not passed
+  # the tests. `docker.yml` was the LESS protected of the two publish paths --
+  # `release.yml`'s publish at least depended on a `cargo build`, this one
+  # depended on nothing at all and pushed `:latest` unconditionally.
+  test:
+    name: Test gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -18,7 +18,6 @@ pub struct AppState {
     pub review_store: Arc<dyn ReviewStore>,
     pub policy_store: Arc<dyn PolicyStore>,
     pub api_key_store: Arc<dyn ApiKeyStore>,
-    pub tenant_store: Arc<dyn TenantStore>,
     // v0.4.0, Durable State stores
     pub nhi_store: Arc<dyn NhiStore>,
     pub session_store: Arc<dyn SessionStore>,

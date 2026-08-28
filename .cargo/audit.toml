@@ -1,6 +1,7 @@
 # Ignored advisories for cargo audit — single source of truth (re-reviewed
-# 2026-06-19 at 1.7.1; CI runs plain `cargo audit` from the repo root and
-# discovers this file). Paths below re-verified with `cargo tree -i`.
+# 2026-08-19 at 2.1.0, previously 2026-06-19 at 1.7.1; CI runs plain
+# `cargo audit` from the repo root and discovers this file). Paths below
+# re-verified with `cargo tree -i`.
 #
 # None of the three crates is in the DEFAULT build. Each enters Cargo.lock only
 # through an optional, compile-time, or feature-gated path, so `cargo audit`
@@ -34,7 +35,7 @@
 #     * `iaga-sentinel-reasoning`: `default = []`, `ml = ["dep:tract-onnx"]`,
 #       and `tract-onnx` is `optional = true`.
 #     * `iaga-sentinel-core`: `ml` is absent from `default`.
-#     * `Dockerfile:22` and `.github/workflows/release.yml:75` both build with
+#     * `Dockerfile:22` and `.github/workflows/release.yml:106` both build with
 #       default features.
 #     * `cargo tree -p iaga-sentinel-core -i tract-nnef` -> "did not match any
 #       packages". It reaches Cargo.lock, which is what cargo-audit scans, and

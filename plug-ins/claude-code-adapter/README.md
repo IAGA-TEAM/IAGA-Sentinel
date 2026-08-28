@@ -99,6 +99,20 @@ Set `matcher` to `*` to govern every tool (including read-only `Read`/`Glob`/`Gr
 | `IAGA_TIMEOUT` | `5` | Request timeout (seconds). |
 | `IAGA_FAIL_CLOSED` | _(unset)_ | If truthy, **deny** when the sidecar is unreachable. Default is fail-open. |
 
+> [!WARNING]
+> **Upgrading the sidecar to 2.1.0 disarms this hook until you rotate its key.** An `agent`-scoped
+> key must now name one agent. A key minted before 2.1.0 has no binding, so the sidecar answers
+> `403 agent_key_unbound` — and with the fail-open default above, the hook reads that as "sidecar
+> unreachable" and returns **allow** for everything, silently. Mint a bound replacement before or
+> immediately after the upgrade:
+>
+> ```bash
+> iaga gen-key --scope agent --agent-id claude-code
+> ```
+>
+> Setting `IAGA_FAIL_CLOSED=1` turns the same situation into a visible deny instead of a silent
+> allow, which is the safer default for a security hook that governs a coding agent.
+
 ## 5. What the hook does
 
 | IAGA decision | Hook output | Effect in Claude Code |

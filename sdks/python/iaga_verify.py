@@ -248,18 +248,40 @@ def verify_export(export: dict, pinned_key_hex: Optional[str] = None) -> VerifyR
 # CLI (mirrors the Rust `iaga-verify` surface and exit codes)
 # --------------------------------------------------------------------------
 
-_USAGE = "usage: iaga-verify <chain.json> [--key <hex-ed25519-pubkey>]"
+_USAGE = "usage: iaga-verify <chain.json> [--key <hex-ed25519-pubkey>] [--expect-count <n>]"
 
 
 def main(argv: list) -> int:
     path: Optional[str] = None
     key: Optional[str] = None
+    expect_count: Optional[int] = None
     it = iter(argv)
     for a in it:
         if a in ("--key", "-k"):
             key = next(it, None)
             if key is None:
                 print("iaga-verify: --key needs a hex public key", file=sys.stderr)
+                return 2
+        # The one honest defence against tail truncation offline, and it has to
+        # exist here too: README.md offers this verifier as the way to check a
+        # chain with no build at all, and sdks/conformance/README.md promises all
+        # three reach the same verdict with the same exit codes. Shipping the
+        # flag only in the Rust binary made that promise false for exactly the
+        # reader who cannot build Rust. Wording copied from the Rust verifier.
+        elif a == "--expect-count":
+            raw = next(it, None)
+            if raw is None:
+                print("iaga-verify: --expect-count needs a value", file=sys.stderr)
+                return 2
+            try:
+                expect_count = int(raw)
+                if expect_count < 0:
+                    raise ValueError
+            except ValueError:
+                print(
+                    "iaga-verify: --expect-count needs a non-negative integer",
+                    file=sys.stderr,
+                )
                 return 2
         elif a in ("-h", "--help"):
             print(_USAGE)
@@ -303,6 +325,19 @@ def main(argv: list) -> int:
         )
 
     if res.ok:
+        if expect_count is not None and res.receipt_count != expect_count:
+            print(
+                f"CHAIN LENGTH MISMATCH  run_id={res.run_id}  receipts={res.receipt_count}  "
+                f"expected={expect_count}  signer={res.signer_key_id}  key={res.key_source}",
+                file=sys.stderr,
+            )
+            print(
+                "the chain is internally valid but not the length you anchored: "
+                f"{res.receipt_count} of {expect_count} receipts. A shorter valid chain is "
+                "what tail truncation looks like.",
+                file=sys.stderr,
+            )
+            return 1
         last = max(res.receipt_count - 1, 0)
         print(
             f"CHAIN OK  run_id={res.run_id}  receipts={res.receipt_count}  "

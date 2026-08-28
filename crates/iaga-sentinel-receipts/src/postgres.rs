@@ -187,25 +187,19 @@ impl ReceiptStore for PgReceiptStore {
             let first_ts: String = r.try_get("first_ts")?;
             let last_ts: String = r.try_get("last_ts")?;
 
+            // Read the terminal verdict out of the SIGNED body, not the mutable
+            // `verdict` column beside it. See the SQLite twin for the full note.
             let verdict_row = sqlx::query(
-                "SELECT verdict FROM receipts WHERE run_id = $1 \
+                "SELECT body_json FROM receipts WHERE run_id = $1 \
                  ORDER BY seq DESC LIMIT 1",
             )
             .bind(&run_id)
             .fetch_one(&self.pool)
             .await?;
-            let verdict_str: String = verdict_row.try_get("verdict")?;
-            let terminal_verdict = match verdict_str.as_str() {
-                "allow" => Verdict::Allow,
-                "review" => Verdict::Review,
-                "block" => Verdict::Block,
-                other => {
-                    return Err(ReceiptError::Storage(format!(
-                        "invalid verdict in DB: {}",
-                        other
-                    )))
-                }
-            };
+            let body_json: String = verdict_row.try_get("body_json")?;
+            let body: ReceiptBody = serde_json::from_str(&body_json)
+                .map_err(|e| ReceiptError::Storage(format!("invalid receipt body in DB: {e}")))?;
+            let terminal_verdict = body.verdict;
             out.push(RunSummary {
                 run_id,
                 receipt_count: cnt as u64,
